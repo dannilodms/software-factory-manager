@@ -29,6 +29,9 @@ const (
 	Seed Command = "seed"
 	// Worker is the command that runs the jobs.
 	Worker Command = "worker"
+	// ProbeReadiness is the command that asks the API it runs beside whether
+	// it is ready: the health check of its container.
+	ProbeReadiness Command = "probe-readiness"
 )
 
 // Config holds every value the binary takes from the environment. Each
@@ -104,6 +107,8 @@ var requiredBy = map[Command][]string{
 		// The delivery of a login code computes the code with its key.
 		"LOGIN_CODE_KEY",
 	},
+	// The probe reaches the API where the API listens.
+	ProbeReadiness: {"API_LISTEN_ADDRESS"},
 }
 
 // requiredBySender lists the variables each sender of e-mail needs, for a

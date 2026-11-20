@@ -1,0 +1,61 @@
+# The Caddyfile of staging: three host names over HTTPS, each read from the
+# environment, which the publish derives from the address of the server. The
+# app at APP_ORIGIN, with the built web app, /api and /up; the file storage
+# at FILE_STORAGE_PUBLIC_URL, forwarded to Garage; and Mailpit at
+# MAILPIT_PUBLIC_URL, behind a password the browser asks for. Rules:
+# Delivery, Health and Files in CODING_STANDARDS.md, and Compose files and
+# Secrets in Environments.
+#
+# The rules of delivery are snippets of delivery.caddyfile, beside this file,
+# which the Caddyfile of development imports too. Compose mounts both, and
+# the Caddy image of the servers holds the built app in /srv.
+#
+# Caddy gets the certificate of each host name by itself, from Let's Encrypt,
+# through ports 80 and 443, and keeps it in /data, a volume the publish keeps
+# while the server lives. On port 80 it answers the certificate authority
+# and sends everything else to HTTPS. It answers HTTP/3 too, over UDP on port
+# 443, which Compose publishes and the firewall of the server lets in. A host name that cannot have a public
+# certificate, such as one under localhost, gets one from Caddy's own local
+# authority instead: the test of this file uses those.
+#
+# The upstreams can be named by the environment, as the test of this file
+# does. Compose leaves them at their defaults, the services of its network.
+
+import delivery.caddyfile
+
+# The options of the whole Caddy: its logs carry no whole address of a
+# caller. The comment above keeps `caddy fmt` from reading this block as one
+# given to the import.
+{
+	import logs-without-whole-addresses
+
+	# The account at the certificate authorities. With an address, Caddy
+	# tries ZeroSSL when Let's Encrypt refuses a certificate; without one,
+	# it tries Let's Encrypt alone. Empty is no address.
+	email "{$ACME_EMAIL}"
+}
+
+{$APP_ORIGIN} {
+	import site-of-the-app {$API_UPSTREAM:api:8080}
+	import security-headers {$FILE_STORAGE_PUBLIC_URL}
+	import the-built-app
+}
+
+# The file storage, at a host name of its own: the browser sends and fetches
+# the bytes of a file here, with a URL the API signed for this host name
+# (Files in CODING_STANDARDS.md). The Host header reaches Garage as the
+# browser sent it, because the signature covers it. Garage answers the
+# cross-origin requests itself, from the rule of its bucket.
+{$FILE_STORAGE_PUBLIC_URL} {
+	reverse_proxy {$FILES_UPSTREAM:garage:3900}
+}
+
+# Mailpit, where the maintainer reads the login codes the worker sent, asks
+# the browser for the user `maintainer` and the password of Mailpit, of which
+# Caddy holds only the bcrypt hash.
+{$MAILPIT_PUBLIC_URL} {
+	basic_auth {
+		maintainer {$MAILPIT_PASSWORD_HASH}
+	}
+	reverse_proxy {$MAIL_UPSTREAM:mailpit:8025}
+}

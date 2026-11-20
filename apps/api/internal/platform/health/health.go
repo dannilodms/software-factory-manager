@@ -15,14 +15,16 @@ import (
 type Check func(ctx context.Context) error
 
 const (
-	livenessPath  = "/livez"
-	readinessPath = "/readyz"
+	livenessPath = "/livez"
+	// ReadinessPath is where readiness answers. The probe of the container
+	// of the API asks it there.
+	ReadinessPath = "/readyz"
 )
 
 // Paths gives the paths of liveness and readiness. A probe calls them every
 // few seconds, so the telemetry of a request records no span for them.
 func Paths() []string {
-	return []string{livenessPath, readinessPath}
+	return []string{livenessPath, ReadinessPath}
 }
 
 // Mount adds GET /livez and GET /readyz to the mux. Liveness touches no part.
@@ -32,7 +34,7 @@ func Mount(mux *http.ServeMux, ready Check, timeout time.Duration) {
 	mux.HandleFunc("GET "+livenessPath, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	mux.HandleFunc("GET "+readinessPath, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET "+ReadinessPath, func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
 		if err := ready(ctx); err != nil {

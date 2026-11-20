@@ -27,9 +27,10 @@ import (
 
 // The API behind Caddy, as development runs it (Delivery and Health in
 // CODING_STANDARDS.md). Each test starts a container of its own from the
-// Caddy image of compose.yaml, with the Caddyfile of development, in front of
-// an API and a stand-in for Vite that listen on the machine. The image is
-// built by `task services`, which `task api:test` runs first.
+// Caddy image of compose.yaml, with the Caddyfile of development and the
+// rules of delivery it imports, in front of an API and a stand-in for Vite
+// that listen on the machine. The image is built by `task services`, which
+// `task api:test` runs first.
 
 const (
 	// caddyImage is the image of the Caddy service of compose.yaml.
@@ -37,6 +38,9 @@ const (
 	// caddyfile is the Caddyfile of development. The test runs in the
 	// directory of its package: the root of the repository is four up.
 	caddyfile = "../../../../deploy/Caddyfile"
+	// deliveryCaddyfile holds the rules of delivery, which the Caddyfile of
+	// each environment imports from beside it.
+	deliveryCaddyfile = "../../../../deploy/delivery.caddyfile"
 	// theApp is what the stand-in for Vite answers to every request.
 	theApp = "the app"
 	// wrongSetupCode is a setup code that opens nothing.
@@ -106,24 +110,40 @@ func standInForVite(t *testing.T) string {
 	return port
 }
 
+// requireCaddyImage fails a test that needs the Caddy image when it is not
+// built.
+func requireCaddyImage(t *testing.T) {
+	t.Helper()
+	_, err := exec.CommandContext(t.Context(), "docker", "image", "inspect", caddyImage).Output()
+	require.NoError(t, err, "the image %s is not built: run `task services`", caddyImage)
+}
+
+// mountOf mounts a file or a folder of the machine, read-only, at a path of
+// the container. Docker Desktop creates a directory where what it mounts is
+// missing, so it must exist.
+func mountOf(t *testing.T, location, target string) string {
+	t.Helper()
+	absolute, err := filepath.Abs(location)
+	require.NoError(t, err)
+	_, err = os.Stat(absolute)
+	require.NoError(t, err)
+	return "type=bind,readonly,source=" + absolute + ",target=" + target
+}
+
 // behindCaddy starts Caddy in front of the API at apiURL and of a stand-in for
 // Vite, and waits until it answers.
 func behindCaddy(t *testing.T, apiURL string) site {
 	t.Helper()
-	_, err := exec.CommandContext(t.Context(), "docker", "image", "inspect", caddyImage).Output()
-	require.NoError(t, err, "the image %s is not built: run `task services`", caddyImage)
+	requireCaddyImage(t)
 	api, err := url.Parse(apiURL)
 	require.NoError(t, err)
-	file, err := filepath.Abs(caddyfile)
-	require.NoError(t, err)
-	// Docker Desktop creates a directory where a file to mount is missing.
-	require.FileExists(t, file)
 
 	container := docker(t, "run", "--detach", "--rm",
 		"--label", "software-factory-manager.test=caddy",
 		"--publish", "127.0.0.1::80",
 		"--add-host", "host.docker.internal:host-gateway",
-		"--mount", "type=bind,readonly,source="+file+",target=/etc/caddy/Caddyfile",
+		"--mount", mountOf(t, caddyfile, "/etc/caddy/Caddyfile"),
+		"--mount", mountOf(t, deliveryCaddyfile, "/etc/caddy/delivery.caddyfile"),
 		"--env", "OTEL_TRACES_EXPORTER=none",
 		"--env", "API_UPSTREAM=host.docker.internal:"+api.Port(),
 		"--env", "WEB_UPSTREAM=host.docker.internal:"+standInForVite(t),
@@ -328,14 +348,12 @@ const composeNetwork = "software-factory-manager_default"
 // Caddy listens on.
 func filesBehindCaddy(t *testing.T) string {
 	t.Helper()
-	file, err := filepath.Abs(caddyfile)
-	require.NoError(t, err)
-	require.FileExists(t, file)
 	container := docker(t, "run", "--detach", "--rm",
 		"--label", "software-factory-manager.test=caddy",
 		"--network", composeNetwork,
 		"--publish", "127.0.0.1::80",
-		"--mount", "type=bind,readonly,source="+file+",target=/etc/caddy/Caddyfile",
+		"--mount", mountOf(t, caddyfile, "/etc/caddy/Caddyfile"),
+		"--mount", mountOf(t, deliveryCaddyfile, "/etc/caddy/delivery.caddyfile"),
 		"--env", "OTEL_TRACES_EXPORTER=none",
 		caddyImage)
 	t.Cleanup(func() {
@@ -494,35 +512,60 @@ func (s site) output(t *testing.T) string {
 	return string(printed)
 }
 
-// standInAPI listens where the API would and answers 204 to every request,
-// after it recorded the address Caddy forwarded it for: the address of the
-// caller as Caddy saw it.
-type standInAPI struct {
-	server *httptest.Server
-	caller atomic.Value
+// standIn listens on the machine where Caddy reaches it, as the API, Garage
+// or Mailpit would, and answers 204 to every request, after it recorded what
+// Caddy forwarded: the address of the caller as Caddy saw it, the Host
+// header and the path.
+type standIn struct {
+	server             *httptest.Server
+	caller, host, path atomic.Value
 }
 
-func standInForTheAPI(t *testing.T) *standInAPI {
+func startStandIn(t *testing.T) *standIn {
 	t.Helper()
 	listener, err := net.Listen("tcp", net.JoinHostPort(machineHost(t), "0"))
 	require.NoError(t, err)
-	api := &standInAPI{}
-	api.caller.Store("")
-	api.server = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		api.caller.Store(r.Header.Get("X-Forwarded-For"))
+	stand := &standIn{}
+	for _, seen := range []*atomic.Value{&stand.caller, &stand.host, &stand.path} {
+		seen.Store("")
+	}
+	stand.server = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stand.caller.Store(r.Header.Get("X-Forwarded-For"))
+		stand.host.Store(r.Host)
+		stand.path.Store(r.URL.Path)
 		w.WriteHeader(http.StatusNoContent)
 	}))
-	api.server.Listener = listener
-	api.server.Start()
-	t.Cleanup(api.server.Close)
-	return api
+	stand.server.Listener = listener
+	stand.server.Start()
+	t.Cleanup(stand.server.Close)
+	return stand
 }
 
 // callerSeen is the address of the caller of the last request, as Caddy
 // forwarded it.
-func (a *standInAPI) callerSeen() string {
-	text, _ := a.caller.Load().(string)
+func (s *standIn) callerSeen() string {
+	text, _ := s.caller.Load().(string)
 	return text
+}
+
+// hostSeen is the Host header of the last request.
+func (s *standIn) hostSeen() string {
+	text, _ := s.host.Load().(string)
+	return text
+}
+
+// pathSeen is the path of the last request.
+func (s *standIn) pathSeen() string {
+	text, _ := s.path.Load().(string)
+	return text
+}
+
+// port is the port of the machine the stand-in listens on.
+func (s *standIn) port(t *testing.T) string {
+	t.Helper()
+	_, port, err := net.SplitHostPort(s.server.Listener.Addr().String())
+	require.NoError(t, err)
+	return port
 }
 
 // The output of Caddy carries the address of a caller cut down to its
@@ -531,7 +574,7 @@ func (a *standInAPI) callerSeen() string {
 // not answer.
 func TestTheOutputOfCaddyCarriesNoAddressOfACallerWhole(t *testing.T) {
 	t.Parallel()
-	api := standInForTheAPI(t)
+	api := startStandIn(t)
 	caddy := behindCaddy(t, api.server.URL)
 	for range 10 {
 		require.Equal(t, http.StatusNoContent, caddy.send(t, http.MethodPost, "/api/setup/open", wrongSetupCode).status)

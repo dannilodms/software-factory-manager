@@ -30,6 +30,9 @@ services:
       service: caddy
     build:
       context: deploy/caddy
+      # Caddy with its plugin and no app: Vite serves the app here. The
+      # stage `servers` of the same Dockerfile holds the built app.
+      target: development
     image: software-factory-manager-caddy:development
     depends_on:
       # The host name of the files leads to a bucket that has its rule.
@@ -40,6 +43,8 @@ services:
       - 127.0.0.1:${CADDY_PORT:?Set CADDY_PORT, as .env.example does}:80
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # The rules of delivery, which the Caddyfile imports from beside it.
+      - ./deploy/delivery.caddyfile:/etc/caddy/delivery.caddyfile:ro
     extra_hosts:
       # The API and Vite listen on the machine. Docker Desktop and Docker
       # Engine on Linux each resolve host-gateway to an address of it.
@@ -50,38 +55,16 @@ services:
       # localhost and log each failure.
       OTEL_TRACES_EXPORTER: none
 
-  # The file storage: the S3 API of Garage, on one node. The API reaches it on
-  # the machine at GARAGE_PORT; the browser reaches it at its own host name,
-  # through Caddy. When it starts, Garage creates the one bucket and its key
-  # from the variables of the API, if they do not exist yet.
+  # The file storage. The API reaches it on the machine at GARAGE_PORT; the
+  # browser reaches it at its own host name, through Caddy.
   garage:
     extends:
       file: deploy/compose.base.yaml
       service: garage
-    command: [/garage, server, --single-node, --default-bucket]
     ports:
       - 127.0.0.1:${GARAGE_PORT:?Set GARAGE_PORT, as .env.example does}:3900
-    configs:
-      - source: garage
-        target: /etc/garage.toml
-    environment:
-      GARAGE_RPC_SECRET: ${GARAGE_RPC_SECRET:?Set GARAGE_RPC_SECRET, as .env.example does}
-      GARAGE_DEFAULT_BUCKET: ${FILE_STORAGE_BUCKET:?Set FILE_STORAGE_BUCKET, as .env.example does}
-      GARAGE_DEFAULT_ACCESS_KEY: ${FILE_STORAGE_ACCESS_KEY_ID:?Set FILE_STORAGE_ACCESS_KEY_ID, as .env.example does}
-      GARAGE_DEFAULT_SECRET_KEY: ${FILE_STORAGE_SECRET_ACCESS_KEY:?Set FILE_STORAGE_SECRET_ACCESS_KEY, as .env.example does}
-    volumes:
-      - garage-data:/var/lib/garage
-    healthcheck:
-      # The image has no shell: Garage itself tells whether the bucket exists.
-      test: [CMD, /garage, bucket, info, "${FILE_STORAGE_BUCKET}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
-      start_interval: 1s
 
-  # The cross-origin rule of the bucket: the browser may send and fetch files
-  # from the origin of the app only. Run again, it writes the same rule.
+  # The cross-origin rule of the bucket, once Garage has the bucket.
   garage-cors:
     extends:
       file: deploy/compose.base.yaml
@@ -89,16 +72,6 @@ services:
     depends_on:
       garage:
         condition: service_healthy
-    entrypoint: [sh, /garage-cors.sh]
-    configs:
-      - source: garage-cors
-        target: /garage-cors.sh
-    environment:
-      APP_ORIGIN: ${APP_ORIGIN:?Set APP_ORIGIN, as .env.example does}
-      FILE_STORAGE_REGION: ${FILE_STORAGE_REGION:?Set FILE_STORAGE_REGION, as .env.example does}
-      FILE_STORAGE_BUCKET: ${FILE_STORAGE_BUCKET}
-      FILE_STORAGE_ACCESS_KEY_ID: ${FILE_STORAGE_ACCESS_KEY_ID}
-      FILE_STORAGE_SECRET_ACCESS_KEY: ${FILE_STORAGE_SECRET_ACCESS_KEY}
 
   # The seed (ADR-0019): fills an empty database with a fictitious consultancy
   # and its administrator, through the use cases of the setup. In development
@@ -117,14 +90,10 @@ services:
       dockerfile: cmd/seed/Dockerfile
     image: software-factory-manager-seed:development
     profiles: [seed]
+    # The migrations were applied from the machine, by `task migrate`.
     depends_on:
       postgres:
         condition: service_healthy
-    environment:
-      # The API role, on the network of Compose. The migrations were applied
-      # from the machine, by `task migrate`.
-      DATABASE_URL: postgres://api:${POSTGRES_API_PASSWORD:?Set POSTGRES_API_PASSWORD, as .env.example does}@postgres:5432/software_factory?sslmode=disable
-      SEED_MAILBOX: ${SEED_MAILBOX:?Set SEED_MAILBOX, as .env.example does}
 
   # The e-mail of development: the worker sends over SMTP to MAILPIT_SMTP_PORT
   # of the machine, and Mailpit keeps every e-mail, delivering none. Its
@@ -181,6 +150,8 @@ volumes:
   postgres-data:
   garage-data:
 
+# The configs are the same as in deploy/compose.staging.yaml, which declares
+# them again, because `extends` copies none: a change goes into both.
 configs:
   # One node, which keeps its data in the volume and holds every copy. The
   # secret its nodes share comes from the environment. Path-style addresses
@@ -196,7 +167,7 @@ configs:
       rpc_public_addr = "127.0.0.1:3901"
 
       [s3_api]
-      s3_region = "${FILE_STORAGE_REGION}"
+      s3_region = "${FILE_STORAGE_REGION:?Set FILE_STORAGE_REGION, as .env.example does}"
       api_bind_addr = "0.0.0.0:3900"
 
   # Dex with one static client, the API, which may send a person back only to

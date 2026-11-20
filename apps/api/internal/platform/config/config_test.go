@@ -194,6 +194,7 @@ func TestLoadNamesARequiredVariableThatIsMissing(t *testing.T) {
 		{config.Worker, "FILE_STORAGE_ACCESS_KEY_ID"},
 		{config.Worker, "FILE_STORAGE_SECRET_ACCESS_KEY"},
 		{config.Worker, "LOGIN_CODE_KEY"},
+		{config.ProbeReadiness, "API_LISTEN_ADDRESS"},
 	}
 	for _, c := range cases {
 		t.Run(string(c.command)+" without "+c.variable, func(t *testing.T) {

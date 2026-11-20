@@ -31,3 +31,7 @@ Thumbs.db
 
 # Local binaries of the API
 apps/api/bin/
+
+# The keys of a server while its environment is on, kept by the tool in
+# apps/api/tools/environment
+/.servers/

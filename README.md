@@ -153,7 +153,7 @@ In production the files are in Backblaze B2. In development and staging they are
 
 Telemetry goes through the collector: traces and metrics from the API, the worker and Caddy, the output of every container, and the metrics of the server, PostgreSQL and the storage. It forwards everything to Grafana otel-lgtm, which keeps it for 30 days and sends the alerts by e-mail. Grafana has a host name of its own behind Caddy, with a login through GitHub. The two telemetry containers run in development only for now: production gets them when someone other than the maintainer uses the system, and until then a hosted monitor outside the server watches it.
 
-The system runs in three environments: development on the maintainer's machine, staging on a server created for one pull request and destroyed afterwards, and production on one server that is always on.
+The system runs in three environments: development on the maintainer's machine, staging on a server turned on by hand to try a pull request and turned off afterwards, and production on one server that is always on.
 
 Frontend and backend live in this single repository:
 
@@ -162,7 +162,7 @@ Frontend and backend live in this single repository:
 ├── apps/
 │   ├── api/          # Go backend and API
 │   └── web/          # the React app, with the design system in src/ui
-├── deploy/           # Caddyfile, Compose files of the servers, cloud-init
+├── deploy/           # Caddyfiles, Compose files of the servers, cloud-init
 ├── .github/          # pipeline workflows
 ├── docs/
 │   ├── adr/          # architecture decisions
@@ -203,7 +203,7 @@ Significant, hard-to-reverse decisions are recorded as ADRs (Architecture Decisi
 - [0016 - Background jobs in PostgreSQL, run by a worker command](docs/adr/0016-background-jobs-in-postgresql-run-by-a-worker-command.md): River, a job saved in the transaction of its use case, a `worker` command of the same binary, few attempts and then a visible failure
 - [0017 - Files in Garage, reached directly by the browser](docs/adr/0017-files-in-garage-reached-directly-by-the-browser.md): Garage in place of MinIO, only the S3 API through the AWS SDK for Go v2, uploads and downloads with short-lived signed URLs
 - [0018 - Credential values encrypted by the API](docs/adr/0018-credential-values-encrypted-by-the-api.md): AES-256-GCM in the Go binary with a key from the deploy configuration, never in the database; a credential file is stored the same way
-- [0019 - Three environments, with staging on a server created on demand](docs/adr/0019-three-environments-with-staging-on-a-server-created-on-demand.md): development on the machine, a staging server created for a labelled pull request and seeded on every publish, production on one Hetzner server; GitHub Actions publishes over SSH, with secrets in GitHub Environments
+- [0019 - Three environments, with staging on a server created on demand](docs/adr/0019-three-environments-with-staging-on-a-server-created-on-demand.md): development on the machine, a staging server turned on and off by hand from the machine, which shows one labelled pull request and is seeded on every publish, production on one Hetzner server; GitHub Actions publishes over SSH, with secrets in GitHub Environments
 - [0020 - PostgreSQL backed up by pgBackRest, and production files in Backblaze B2](docs/adr/0020-postgresql-backed-up-by-pgbackrest-and-production-files-in-backblaze-b2.md): continuous encrypted backups at another provider with a monthly restore test, and production files in a versioned bucket; Garage stays in development and staging
 - [0021 - A public repository under AGPLv3](docs/adr/0021-a-public-repository-under-agplv3.md): public on GitHub's free plan, with the rules that being public sets for commits and for the pipeline
 - [0022 - A record with a lifecycle is a state machine in the domain](docs/adr/0022-a-record-with-a-lifecycle-is-a-state-machine-in-the-domain.md): a fixed set of statuses and one transition table per aggregate, in plain Go; the allowed actions come from the same table, and only the name of a status is configuration content
@@ -260,7 +260,7 @@ Significant, hard-to-reverse decisions are recorded as ADRs (Architecture Decisi
 | [Dex](https://dexidp.io/) | Identity container behind the local login provider, in development and tests |
 | [Hetzner Cloud](https://www.hetzner.com/cloud) | The production server, and the staging server created on demand |
 | [GitHub Actions](https://docs.github.com/actions) | The pipeline: checks on every pull request, publishing, scheduled tests |
-| [GitHub CLI](https://cli.github.com/) | How agents reach GitHub: pull requests, runs, secrets |
+| [GitHub CLI](https://cli.github.com/) | How agents reach GitHub: pull requests, runs, secrets; and how turning staging on and off writes to the GitHub Environment of staging |
 | [Caddy](https://caddyserver.com/) | HTTPS, static frontend files, reverse proxy to the API, security headers and the limit on the login code and the setup code |
 | [Docker](https://www.docker.com/) | Packaging and running the services in containers (Docker Compose) |
 | [Task](https://taskfile.dev/) | Task runner for the repository (dev, build, test, code generation) |
@@ -278,7 +278,7 @@ Significant, hard-to-reverse decisions are recorded as ADRs (Architecture Decisi
 | Go | 1.27.4 | [go.dev/dl](https://go.dev/dl/) |
 | Vite+ (manages Node.js and pnpm) | 1.6.0 | [viteplus.dev](https://viteplus.dev/) |
 | Task | 3.54.0 | [taskfile.dev](https://taskfile.dev/installation/) |
-| GitHub CLI | 2.104.0 | [cli.github.com](https://cli.github.com/). Only to open pull requests and read the pipeline |
+| GitHub CLI | 2.104.0 | [cli.github.com](https://cli.github.com/). To open pull requests and read the pipeline, and to turn staging on and off, logged in as the maintainer (`gh auth login`) with the token whose permissions are in [`docs/providers.md`](docs/providers.md#github) |
 
 Each minimum is the version in use on the maintainer's machine, recorded in [`docs/machine-tools.yaml`](docs/machine-tools.yaml). No earlier version has been tried. Git clones the repository.
 
@@ -292,12 +292,15 @@ The API binary reads its configuration from environment variables only, once, wh
 
 Every variable is listed in the committed `.env.example`, with no real secret.
 
+The tool that turns staging on and off reads two variables that are not there, because they belong to the maintainer's machine and no server and no publish reads them from there: `HETZNER_TOKEN`, the API token of the Hetzner project of staging, which never reaches a server or GitHub, and `STAGING_MAILPIT_PASSWORD`, the password of the Mailpit of staging. Both go in the `.env` of the main checkout, which the tool reads also when it runs in a worktree. The token is written there by the maintainer; the password by the tool, the first time staging is turned on (see Deploy).
+
 | Environment | Where the values are |
 | --- | --- |
 | Development | `.env.example`, whose values work as they are. A `.env` file, never committed, changes one: Task reads it first |
-| Staging and production | The GitHub Environment of each one: a secret for what is secret, a variable for the rest. The publish writes them to a variables file on the server, readable by the deploy user alone |
+| Staging | The publish of the tool of the environments, which decides a value for every name of `.env.example` in `apps/api/tools/environment/variables.go`: fixed, derived from the publish (the address of the server, the commit, the password of Mailpit), drawn at random on each publish, or deliberately empty. It writes them to a variables file on the server, readable by the deploy user alone. The GitHub Environment `staging` holds only what reaches the server |
+| Production | The GitHub Environment `production`: a secret for what is secret, a variable for the rest. The publish writes them to a variables file on the server, readable by the deploy user alone |
 
-A new variable needs its value set in both GitHub Environments before the merge. The publish compares the names in `.env.example` with the values it has and stops, before restarting anything, when one is missing.
+A new variable gets its staging value decided in `apps/api/tools/environment/variables.go`, and its production value set in the GitHub Environment `production`, before the merge. The publish compares the names in `.env.example` with the values it has and stops, before it logs in to the server, when one is missing.
 
 A command of the binary requires only the variables it uses. The ones the binary reads today:
 
@@ -389,7 +392,7 @@ The local login provider is Dex, at `http://localhost:5556` (`DEX_PORT`), which 
 
 The login screen shows a button for it, "Log in with Local login provider", above the login with a code; the button, like opening `http://localhost/api/session/login_providers/local/start` in the browser, sends the browser to the login page of Dex; once the person logs in there, Dex sends the browser back to the API, which logs the administrator in and returns to the root of the app, or to the path of the app in `?return_to=`. The first login through Dex finds the user by the e-mail Dex says is verified and links the account; the later ones find the user by that link. `http://localhost/api/session/login` tells the providers turned on and, after a refused login, its e-mail. Dex keeps what it needs in memory, so a login in flight does not survive its restart; the people it knows are in its configuration, in `compose.yaml`. Logging in as the developer brings the login screen back with the notice and the e-mail.
 
-`http://localhost/up` answers with the status of the readiness of the API and no body: 503 until the migrations are applied, and 502 while the API is not running. The API itself answers liveness at `http://127.0.0.1:8080/livez` and readiness at `http://127.0.0.1:8080/readyz`, which Caddy does not forward.
+`http://localhost/up` answers with the status of the readiness of the API and no body: 503 until the migrations are applied, and 502 while the API is not running. The API itself answers liveness at `http://127.0.0.1:8080/livez` and readiness at `http://127.0.0.1:8080/readyz`, which Caddy does not forward. On a server, the command `probe-readiness` of the API binary asks the API in its container the same, as the health check of Compose, since the image has no shell.
 
 A new install has no user and no consultancy. `task issue-setup-code` issues the setup code that opens the setup and prints, to the output of the command itself, the code, when it stops working, what it opens and the address of the setup. The code lasts one hour, and a new one ends the one before. Only its hash is stored, so a code that was lost cannot be read back: issue another. On a server, the same command of the API binary, `issue-setup-code`, runs inside the API container. The app takes the code at the address of the setup, `/setup`: until the setup is concluded, every address of the app leads there. Once it is concluded, the same command is the way back in when no administrator can log in: the code it issues opens `/setup` at the step of the administrator and registers a new one, and no user that exists is changed.
 
@@ -403,18 +406,22 @@ The commands, run from the repository root:
 | `task migrate` | Applies the pending migrations to the development database. A second run applies nothing |
 | `task issue-setup-code` | Issues a setup code in the development database and prints it, with when it stops working, what it opens and the address of the setup |
 | `task seed` | Fills the development database with the fictitious consultancy and its administrator, through the use cases of the setup, so the app opens on the login screen. On a database whose setup is concluded it changes nothing |
-| `task seed:image` | Builds the image of the seed, the `seed` service of `compose.yaml`, which staging runs, and publishes nothing. The pipeline runs it on every pull request |
+| `task seed:image` | Builds the image of the seed, `software-factory-manager-seed:servers`, which staging runs, and publishes nothing. The pipeline runs it on every pull request |
+| `task api:image` | Builds the image of the API, `software-factory-manager-api:servers`, which the servers run with each command of the binary, and publishes nothing. The pipeline runs it on every pull request |
+| `task caddy:image` | Builds the web app with `task web:build`, then the Caddy image of the servers with the app inside, `software-factory-manager-caddy:servers`, and publishes nothing. The pipeline runs it on every pull request |
 | `task dev` | Starts the API, the worker and Vite together. The app opens at `http://localhost`, through Caddy |
 | `task api` | Starts the API alone, at `http://127.0.0.1:8080` |
 | `task worker` | Starts the worker alone, which runs the jobs of the development database. It stops at once when a migration is pending |
 | `task web` | Starts Vite alone, at port 5173, behind Caddy |
 | `task api:build` | Builds the API binary into `apps/api/bin` |
+| `task web:build` | Builds the web app for the servers into `apps/web/dist`, with a Brotli copy beside each text file |
 | `task api:test` | Starts the services and runs the Go tests. A test that needs PostgreSQL creates its own temporary database there; a test of the file storage writes objects of its own to the bucket of Garage and removes them; a test of the SMTP adapter sends to Mailpit, to an address of its own, and reads the e-mail back through its API; a test of the login through a provider logs in at Dex, driving its login page over HTTP. Arguments after `--` replace the list of packages |
 | `task api:test:resend` | Runs the tests of the Resend adapter against Resend itself, sending to its test addresses, which deliver nothing, with the key in `RESEND_TEST_API_KEY`. Without the key they skip. The scheduled workflow `resend.yml` runs them every day, never a pull request |
 | `task db:clean` | Drops the databases the Go tests leave in the development PostgreSQL, the ones named `test_...` and `testdb_...`: the database of a test that failed or was killed, and a template of pgtestdb for each state the migrations had. No other database is touched, neither `software_factory` nor `software_factory_e2e`. Run it when no test runs, now and then or when the list of databases grows: a database still in use is not dropped, and the command stops on it |
 | `task api:lint` | Lints the Go code and checks its format, the imports between layers and between domain areas, `else` and the level of nesting |
 | `task api:format` | Rewrites the Go files as the formatter asks |
 | `task versions:check` | Checks that every version the repository pins is exact: no range, no `latest`, no floating tag |
+| `task compose:check` | Checks the Compose file of staging with `docker compose config --quiet`, which prints nothing |
 | `task workflows:check` | Checks the workflow files with actionlint and zizmor, each run from its Docker image |
 | `task api:generate` | Generates, with sqlc, the Go code of the `postgres` adapters from the SQL files of each one. What it writes is committed |
 | `task api:generate:check` | Fails when the committed code that sqlc generated is stale |
@@ -429,7 +436,7 @@ The commands, run from the repository root:
 | `task web:imports` | Fails when an import of the app breaks its dependency rule, with dependency-cruiser |
 | `task web:knip` | Fails on a file, an export or a dependency of the app that nothing uses, with Knip |
 | `task e2e` | Runs the end-to-end test of the setup and the login in Chromium, through Caddy, with Playwright: the setup, a login through Dex, the shell and the logout, a login with a code read from Mailpit, and the limits of Caddy. It starts the services, Mailpit and Dex among them, builds the API, restarts Caddy so that its limits start empty, creates the database `software_factory_e2e` empty and applies the migrations, and creates the bucket `software-factory-e2e-files` in Garage on its first run; Playwright starts the API, the worker and Vite on that database and that bucket, and stops them at the end. The development database and its bucket are not touched. Ports 8080 and 5173 must be free: stop `task dev` first. A failed test leaves its trace in `apps/web/test-results`, which `vp exec playwright show-trace <file>`, run in `apps/web`, opens |
-| `task check` | Runs every check of a pull request: the exact versions, the check of the workflow files, the check of the generated client, the format, lint and type checks of `apps/web`, its dependency rule, its unused code, its missing translation keys and its tests, then the lint of the API, the check of the generated code, the check of the OpenAPI spec, the check of the lists of the app, the lint and the breaking-change report of the spec, the build and the tests of the API, and the end-to-end test. Because of the end-to-end test it needs ports 8080 and 5173 free and restarts Caddy: stop `task dev` first |
+| `task check` | Runs every check of a pull request: the exact versions, the check of the workflow files, the check of the generated client, the format, lint and type checks of `apps/web`, its dependency rule, its unused code, its missing translation keys and its tests, then the lint of the API, the check of the generated code, the check of the OpenAPI spec, the check of the lists of the app, the lint and the breaking-change report of the spec, the build of the API, the build of the web app and the three images a commit is published with, the tests of the API, and the end-to-end test. Because of the end-to-end test it needs ports 8080 and 5173 free and restarts Caddy: stop `task dev` first |
 | `task check:quick` | Runs everything `task check` runs except the end-to-end test, for daily use. It needs no free port and does not restart Caddy, so it runs beside `task dev`. Before a pull request, run `task check` |
 | `task check:fix` | Runs the format, lint and type checks of `apps/web` and fixes what can be fixed |
 
@@ -439,27 +446,43 @@ The REST contract is `apps/api/openapi.yaml`. It is generated from the operation
 
 ### Build
 
-- **Backend.** One Go binary, in one image: the API, plus the `worker` and `migrate` commands. The migrations are embedded in it.
+- **Backend.** One Go binary, in one image: the API, plus the `worker`, `migrate`, `issue-setup-code` and `probe-readiness` commands. The migrations are embedded in it.
 - **Seed and LLM stand-in.** Each is a `main` package of its own in the same Go module, built into its own image. Production runs neither.
 - **Frontend.** Vite+ builds `apps/web` into static files, with a Brotli copy beside each text file. Caddy serves them.
-- **Caddy and PostgreSQL.** Both images are built in this repository: Caddy with a rate-limit plugin, PostgreSQL with pgBackRest.
+- **Caddy and PostgreSQL.** Both images are built in this repository: Caddy with a rate-limit plugin, and on the servers with the built web app inside; PostgreSQL with pgBackRest.
 - **Generated code.** The pipeline checks that it is up to date: the Go code sqlc generates from the SQL files, the OpenAPI spec generated from the Go code, and the client orval generates from that spec.
 - **Versions.** The build installs from `go.sum` and `pnpm-lock.yaml` and fails when they would change.
 - **Images.** GitHub Actions builds them, tags each with the hash of its commit and pushes it to the GitHub container registry. Production runs only an image built from `main`. The images of a release also carry its number.
 
-`task api:build` builds the API binary into `apps/api/bin`. The image of the seed is built from `apps/api/cmd/seed/Dockerfile` by the `seed` service of `compose.yaml`, which lives in a Compose profile of its own so that `task services` does not start it: `docker compose --profile seed run --rm --build seed` builds it and runs it on the development database. The other commands are _TBD_, each written with what it builds.
+`task api:build` builds the API binary into `apps/api/bin`. The image of the seed is built from `apps/api/cmd/seed/Dockerfile` by the `seed` service of `compose.yaml`, which lives in a Compose profile of its own so that `task services` does not start it: `docker compose --profile seed run --rm --build seed` builds it and runs it on the development database. `task api:image` builds the image of the API from `apps/api/cmd/api/Dockerfile`, and `task caddy:image` builds the web app, with `task web:build`, and then the stage `servers` of `deploy/caddy/Dockerfile`, with the output of the build as its context; development builds the stage `development` of the same file, which holds no app. Each of the three is built on every pull request and published nowhere. The other commands are _TBD_, each written with what it builds.
 
 ### Deploy
 
 Every change reaches `main` through a pull request, and a merge into `main` is published to production once the pipeline passes. GitHub Actions builds the images, pushes them to the GitHub container registry and logs in to the server over SSH to pull them and restart the Compose services. The secrets of each environment are in GitHub Environments, and the publish writes them to a variables file on the server (see [ADR-0019](docs/adr/0019-three-environments-with-staging-on-a-server-created-on-demand.md)).
 
-To look at a branch before merging it, give its pull request the `staging` label. A server is created with the branch on it, a fresh database and the seed data. It is destroyed when the label is removed or the pull request closes, and never lives longer than 24 hours.
+Staging is a server that exists only while a pull request is tried on it, and costs only while it is on (see [`docs/providers.md`](docs/providers.md)). It is turned on and off by hand, from the main checkout or a worktree of it:
+
+```sh
+task staging:on      # create the server, wait until it is ready, and give GitHub what reaches it
+task staging:status  # on or off, since when, its address, its host names and the labelled pull request
+task staging:off     # destroy the server, with its address and its deploy key, and take them out of GitHub
+```
+
+The machine needs `HETZNER_TOKEN` in the `.env` of the main checkout: an API token of the Hetzner project `software-factory-manager-staging`, with read and write permission. It also needs `gh` logged in as the maintainer, with the permissions that the row "Token of `gh` on the maintainer's machine" gives, in the GitHub section of [`docs/providers.md`](docs/providers.md#github). `task staging:on` makes sure the GitHub Environment `staging` and the label `staging` exist, creates the server from the choices in `deploy/server.staging.yaml`, prepared by `deploy/cloud-init.yaml`, and returns once the server answers SSH with the host key it was given and cloud-init has prepared it, and the GitHub Environment `staging` has what the pipeline needs to reach it: the address, the host key and the deploy key of the server, and the password of Mailpit. When that fails, it destroys the server and takes those values out of GitHub before it reports the failure. Turning staging on when it is on creates nothing and gives GitHub the same values again; turning it off when it is off destroys nothing. Nothing turns it off by itself: once it has been on for more than 24 hours, the scheduled workflow `staging-reminder.yml` fails every six hours, which warns the maintainer, until it is turned off. `task staging:off` leaves only the password of Mailpit in GitHub.
+
+The password of Mailpit is chosen the first time staging is turned on and kept in the `.env` of the main checkout, as `STAGING_MAILPIT_PASSWORD`: read it there, since GitHub never gives a secret back. Every later turn-on uses the same one.
+
+While staging is on, the main checkout keeps its deploy key in `.servers/staging/`, which git ignores, and `ssh -F .servers/staging/ssh_config staging`, run there, logs in to the server as the deploy user. Its host names are under its address, written for `sslip.io`, which is provisional until the domain is registered (see [`docs/providers.md`](docs/providers.md#sslipio)): they change each time staging is turned on, and `task staging:status` prints them.
+
+A pull request of this repository that has the `staging` label is published to staging once its checks pass, by the job `Publish to staging` of `ci.yml`: it builds the three images of the commit the checks tested, pushes them to the GitHub container registry, tagged with its hash, and runs `go run ./tools/environment publish staging`, the publish of the same tool. That logs in to the server over SSH as the deploy user, trusting only its host key, copies the Compose files and Caddy's configuration, writes the variables file, pulls the images, stops the API and the worker, removes PostgreSQL, Garage and Mailpit with their data, starts the three again with Caddy, applies the migrations, runs the seed, starts the API and the worker, and waits until `/up` answers over HTTPS. A comment on the pull request then gives the address of the app and of Mailpit, whose user is `maintainer` and whose password is `STAGING_MAILPIT_PASSWORD`. The data is the seed's: log in as `seed+admin@fabrica.example` with a login code, read in Mailpit. When staging is off, the job publishes nothing, says so in a notice and passes. Only one publish runs at a time, and a running one is never cancelled, unless its label is taken off by hand and added again while it publishes, which publishes the pull request again.
+
+Staging shows one pull request at a time. Adding the `staging` label to a pull request that is open runs its checks again and publishes it; adding another label publishes nothing. A publish takes the label off every other open pull request that has it, with a comment there naming the pull request staging shows now, so that a push to one of them publishes nothing; adding the label to it again publishes it again. A pull request that lost the label, or was closed, before its publish started is not published.
 
 Going back to an earlier version is a manual workflow that publishes an earlier commit of `main`, named by its hash or by a release.
 
 A release gives a number and notes to a milestone that is already in production. It is a pull request that changes `VERSION` and `CHANGELOG.md`. After it is published, the pipeline creates the tag, the GitHub Release and the numbered tag on the images (see [ADR-0023](docs/adr/0023-a-release-names-a-milestone-already-in-production.md)). The first release, 0.1.0, is still to come.
 
-A deploy restarts the single API instance. The API finishes the requests in flight before it exits (see Shutdown in [`CODING_STANDARDS.md`](CODING_STANDARDS.md)), so the Compose file gives it a `stop_grace_period` of 30 seconds, and Caddy holds new requests for up to 30 seconds (`lb_try_duration`) until the new instance accepts connections.
+A deploy restarts the single API instance. The API finishes the requests in flight before it exits (see Shutdown in [`CODING_STANDARDS.md`](CODING_STANDARDS.md)), so the Compose file gives it a `stop_grace_period` of 45 seconds. Caddy holds no request meanwhile: until the new instance accepts connections, it answers a request to `/api` with a 502 in the error format of the API (see API out of reach in [`CODING_STANDARDS.md`](CODING_STANDARDS.md)).
 
 Before the API starts, a one-shot Compose service applies the pending database migrations, and the API starts only when it succeeds. When a migration is pending, the deploy takes a `pg_dump` first, because migrations have no way back (see [ADR-0015](docs/adr/0015-hand-written-sql-checked-by-sqlc-and-forward-only-migrations.md)).
 

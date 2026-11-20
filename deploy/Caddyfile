@@ -4,6 +4,12 @@
 # has a host name of its own, files.localhost. Rules: Delivery, Health and
 # Files in CODING_STANDARDS.md.
 #
+# The rules of delivery are snippets of delivery.caddyfile, beside this file,
+# which the Caddyfile of staging imports too. Development imports every one
+# but two: the built app, because Vite serves the app here, and the security
+# headers, whose policy refuses the inline script and the style elements
+# Vite writes into the page to reload it as the code changes.
+#
 # A site is a block of its own: an address and its directives. A host name
 # for another service, such as the file storage, is a second block beside
 # this one, `http://<name>.localhost { ... }`. Browsers send every name under
@@ -15,100 +21,21 @@
 # the machine, which Docker reaches as host.docker.internal, and Garage, a
 # container of the same network, by the name of its service.
 
-# Privacy in Observability: the output of Caddy carries the address of a
-# caller cut down to its network, never whole. The rate-limit plugin writes
-# it as remote_ip when it refuses a request, and Caddy writes the request of
-# an error with remote_ip and client_ip. Every line goes through the filter,
-# which keeps 24 bits of an IPv4 address and 48 of an IPv6 one.
+import delivery.caddyfile
+
+# The options of the whole Caddy: its logs carry no whole address of a
+# caller. The comment above keeps `caddy fmt` from reading this block as one
+# given to the import.
 {
-	log default {
-		format filter {
-			wrap json
-			fields {
-				remote_ip ip_mask 24 48
-				client_ip ip_mask 24 48
-				request>remote_ip ip_mask 24 48
-				request>client_ip ip_mask 24 48
-			}
-		}
-	}
+	import logs-without-whole-addresses
 }
 
 # Plain HTTP: development has no certificate, so no site redirects to HTTPS.
 http://localhost {
-	# The trace of a request starts here. Its identifier reaches the API in
-	# the traceparent header, and is the trace_id of the 429 below.
-	tracing
-
-	# The readiness of the API, with its status and no body. When the API
-	# does not answer, Caddy answers 502, with no body either. Liveness and
-	# readiness themselves are never forwarded: they are outside /api.
-	handle /up {
-		rewrite * /readyz
-		reverse_proxy {$API_UPSTREAM:host.docker.internal:8080}
-	}
-
-	@api path /api /api/*
-	handle @api {
-		# Set as the response leaves, so that it replaces any the API sent.
-		header >Cache-Control no-store
-
-		# Each POST of the setup checks a setup code: ten a minute for each
-		# IP address, counted together. Past it, the error below answers.
-		# The two operations of the login code, asking for one and checking
-		# it, have a zone of their own: ten a minute for each IP address,
-		# counted together.
-		rate_limit {
-			zone setup {
-				match {
-					method POST
-					path /api/setup/*
-				}
-				key {remote_host}
-				events 10
-				window 1m
-			}
-			zone login {
-				match {
-					method POST
-					path /api/session/login_code /api/session/login_code/check
-				}
-				key {remote_host}
-				events 10
-				window 1m
-			}
-		}
-
-		reverse_proxy {$API_UPSTREAM:host.docker.internal:8080}
-	}
+	import site-of-the-app {$API_UPSTREAM:host.docker.internal:8080}
 
 	handle {
 		reverse_proxy {$WEB_UPSTREAM:host.docker.internal:5173}
-	}
-
-	# The 429 of the limit, in the error format of the API: the schema
-	# Problem of apps/api/openapi.yaml. Only the limit returns one.
-	handle_errors 429 {
-		header Content-Type application/problem+json
-		header Cache-Control no-store
-		respond `{"title":"Too Many Requests","status":429,"code":"too_many_requests","params":{},"trace_id":"{http.vars.trace_id}"}` 429
-	}
-
-	# The API cannot be reached: under /api, Caddy answers in the error format
-	# too, with the code the API would give the status. /up keeps its status
-	# and no body.
-	handle_errors 502 503 504 {
-		@apiFailure path /api /api/*
-		handle @apiFailure {
-			map {err.status_code} {problem_code} {
-				502 bad_gateway
-				503 service_unavailable
-				504 gateway_timeout
-			}
-			header Content-Type application/problem+json
-			header Cache-Control no-store
-			respond `{"title":"{err.status_text}","status":{err.status_code},"code":"{problem_code}","params":{},"trace_id":"{http.vars.trace_id}"}` {err.status_code}
-		}
 	}
 }
 

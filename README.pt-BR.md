@@ -153,7 +153,7 @@ Em produção os arquivos ficam no Backblaze B2. Em desenvolvimento e na homolog
 
 A telemetria passa pelo coletor: traces e métricas da API, do worker e do Caddy, a saída de todos os containers e as métricas do servidor, do PostgreSQL e do armazenamento. Ele repassa tudo ao Grafana otel-lgtm, que guarda por 30 dias e envia os alertas por e-mail. O Grafana tem um endereço próprio atrás do Caddy, com login pelo GitHub. Por enquanto os dois containers de telemetria rodam só em desenvolvimento: a produção passa a tê-los quando alguém além do mantenedor usar o sistema, e até lá um monitor hospedado fora do servidor a vigia.
 
-O sistema roda em três ambientes: desenvolvimento na máquina do mantenedor, homologação (staging) em um servidor criado para um pull request e destruído depois, e produção em um servidor sempre ligado.
+O sistema roda em três ambientes: desenvolvimento na máquina do mantenedor, homologação (staging) em um servidor ligado à mão para experimentar um pull request e desligado depois, e produção em um servidor sempre ligado.
 
 Frontend e backend ficam neste único repositório:
 
@@ -162,7 +162,7 @@ Frontend e backend ficam neste único repositório:
 ├── apps/
 │   ├── api/          # backend e API em Go
 │   └── web/          # o app React, com o design system em src/ui
-├── deploy/           # Caddyfile, arquivos Compose dos servidores, cloud-init
+├── deploy/           # Caddyfiles, arquivos Compose dos servidores, cloud-init
 ├── .github/          # workflows da pipeline
 ├── docs/
 │   ├── adr/          # decisões de arquitetura
@@ -203,7 +203,7 @@ As decisões relevantes e difíceis de reverter são registradas como ADRs (Arch
 - [0016 - Trabalhos em segundo plano no PostgreSQL, executados por um comando worker](docs/adr/0016-background-jobs-in-postgresql-run-by-a-worker-command.md): River, o trabalho gravado na transação do seu caso de uso, um comando `worker` do mesmo binário, poucas tentativas e depois uma falha visível
 - [0017 - Arquivos no Garage, acessados direto pelo navegador](docs/adr/0017-files-in-garage-reached-directly-by-the-browser.md): Garage no lugar do MinIO, apenas a API S3 pelo AWS SDK para Go v2, uploads e downloads com URLs assinadas de curta duração
 - [0018 - Valores de credenciais cifrados pela API](docs/adr/0018-credential-values-encrypted-by-the-api.md): AES-256-GCM no binário Go com uma chave vinda da configuração do deploy, nunca no banco; uma credencial em arquivo é guardada do mesmo modo
-- [0019 - Três ambientes, com a homologação em um servidor criado sob demanda](docs/adr/0019-three-environments-with-staging-on-a-server-created-on-demand.md): desenvolvimento na máquina, um servidor de homologação criado para um pull request rotulado e populado pelo seed a cada publicação, produção em um servidor da Hetzner; o GitHub Actions publica por SSH, com os segredos nos Environments do GitHub
+- [0019 - Três ambientes, com a homologação em um servidor criado sob demanda](docs/adr/0019-three-environments-with-staging-on-a-server-created-on-demand.md): desenvolvimento na máquina, um servidor de homologação ligado e desligado à mão a partir da máquina, que mostra um pull request rotulado e é populado pelo seed a cada publicação, produção em um servidor da Hetzner; o GitHub Actions publica por SSH, com os segredos nos Environments do GitHub
 - [0020 - PostgreSQL com backup pelo pgBackRest, e arquivos de produção no Backblaze B2](docs/adr/0020-postgresql-backed-up-by-pgbackrest-and-production-files-in-backblaze-b2.md): backups contínuos e cifrados em outro provedor, com um teste mensal de restauração, e os arquivos de produção em um bucket com versionamento; o Garage continua em desenvolvimento e na homologação
 - [0021 - Um repositório público sob a AGPLv3](docs/adr/0021-a-public-repository-under-agplv3.md): público no plano gratuito do GitHub, com as regras que isso impõe aos commits e à pipeline
 - [0022 - Um registro com ciclo de vida é uma máquina de estados no domínio](docs/adr/0022-a-record-with-a-lifecycle-is-a-state-machine-in-the-domain.md): um conjunto fixo de status e uma tabela de transições por agregado, em Go puro; as ações permitidas saem da mesma tabela, e só o nome de um status é conteúdo de configuração
@@ -260,7 +260,7 @@ As decisões relevantes e difíceis de reverter são registradas como ADRs (Arch
 | [Dex](https://dexidp.io/) | Container de identidade por trás do provedor de login local, em desenvolvimento e nos testes |
 | [Hetzner Cloud](https://www.hetzner.com/cloud) | O servidor de produção e o servidor de homologação criado sob demanda |
 | [GitHub Actions](https://docs.github.com/actions) | A pipeline: verificações em cada pull request, publicação e testes agendados |
-| [GitHub CLI](https://cli.github.com/) | Como os agentes acessam o GitHub: pull requests, execuções e segredos |
+| [GitHub CLI](https://cli.github.com/) | Como os agentes acessam o GitHub: pull requests, execuções e segredos; e como ligar e desligar a homologação grava no Environment do GitHub da homologação |
 | [Caddy](https://caddyserver.com/) | HTTPS, arquivos estáticos do frontend, proxy reverso para a API, cabeçalhos de segurança e o limite do código de login e do código de configuração |
 | [Docker](https://www.docker.com/) | Empacotamento e execução dos serviços em containers (Docker Compose) |
 | [Task](https://taskfile.dev/) | Executor de tarefas do repositório (desenvolvimento, build, testes, geração de código) |
@@ -278,7 +278,7 @@ As decisões relevantes e difíceis de reverter são registradas como ADRs (Arch
 | Go | 1.27.4 | [go.dev/dl](https://go.dev/dl/) |
 | Vite+ (gerencia Node.js e pnpm) | 1.6.0 | [viteplus.dev](https://viteplus.dev/) |
 | Task | 3.54.0 | [taskfile.dev](https://taskfile.dev/installation/) |
-| GitHub CLI | 2.104.0 | [cli.github.com](https://cli.github.com/). Só para abrir pull requests e consultar a pipeline |
+| GitHub CLI | 2.104.0 | [cli.github.com](https://cli.github.com/). Para abrir pull requests e consultar a pipeline, e para ligar e desligar a homologação, logado como o mantenedor (`gh auth login`) com o token cujas permissões estão no [`docs/providers.md`](docs/providers.md#github) |
 
 Cada mínimo é a versão em uso na máquina do mantenedor, registrada em [`docs/machine-tools.yaml`](docs/machine-tools.yaml). Nenhuma versão anterior foi testada. O Git clona o repositório.
 
@@ -292,12 +292,15 @@ O binário da API lê a configuração apenas de variáveis de ambiente, uma ún
 
 Toda variável está listada no `.env.example` versionado, sem segredos reais.
 
+A ferramenta que liga e desliga a homologação lê duas variáveis que não estão lá, porque elas pertencem à máquina do mantenedor e nenhum servidor e nenhuma publicação as lê dali: `HETZNER_TOKEN`, o token de API do projeto de homologação na Hetzner, que nunca chega a um servidor nem ao GitHub, e `STAGING_MAILPIT_PASSWORD`, a senha do Mailpit da homologação. As duas ficam no `.env` do checkout principal, que a ferramenta lê também quando roda em uma worktree. O token é escrito ali pelo mantenedor; a senha, pela ferramenta, na primeira vez que a homologação é ligada (veja Deploy).
+
 | Ambiente | Onde ficam os valores |
 | --- | --- |
 | Desenvolvimento | O `.env.example`, cujos valores funcionam como estão. Um arquivo `.env`, nunca versionado, altera um valor: o Task o lê primeiro |
-| Homologação e produção | O Environment do GitHub de cada um: um segredo para o que é secreto, uma variável para o restante. A publicação os grava em um arquivo de variáveis no servidor, que só o usuário de deploy consegue ler |
+| Homologação | A publicação da ferramenta dos ambientes, que decide um valor para cada nome do `.env.example` em `apps/api/tools/environment/variables.go`: fixo, derivado da publicação (o endereço do servidor, o commit, a senha do Mailpit), sorteado a cada publicação ou deliberadamente vazio. Ela os grava em um arquivo de variáveis no servidor, que só o usuário de deploy consegue ler. O Environment `staging` do GitHub guarda só o que chega ao servidor |
+| Produção | O Environment `production` do GitHub: um segredo para o que é secreto, uma variável para o restante. A publicação os grava em um arquivo de variáveis no servidor, que só o usuário de deploy consegue ler |
 
-Uma variável nova precisa ter o valor definido nos dois Environments do GitHub antes do merge. A publicação compara os nomes do `.env.example` com os valores que tem e para, antes de reiniciar qualquer coisa, quando falta algum.
+Uma variável nova recebe o valor da homologação, decidido em `apps/api/tools/environment/variables.go`, e o valor de produção, definido no Environment `production` do GitHub, antes do merge. A publicação compara os nomes do `.env.example` com os valores que tem e para, antes de entrar no servidor, quando falta algum.
 
 Cada comando do binário exige apenas as variáveis que usa. As que o binário lê hoje:
 
@@ -389,7 +392,7 @@ O provedor de login local é o Dex, em `http://localhost:5556` (`DEX_PORT`), que
 
 A tela de login mostra um botão para ele, "Entrar com Local login provider", acima do login com um código; o botão, como abrir `http://localhost/api/session/login_providers/local/start` no navegador, leva o navegador à página de login do Dex; quando a pessoa entra ali, o Dex devolve o navegador à API, que faz o login da administradora e volta à raiz do app, ou ao caminho do app em `?return_to=`. O primeiro login pelo Dex encontra o usuário pelo e-mail que o Dex diz verificado e vincula a conta; os seguintes encontram o usuário por esse vínculo. `http://localhost/api/session/login` diz os provedores ligados e, depois de um login recusado, o e-mail dele. O Dex guarda o que precisa na memória, então um login em andamento não sobrevive a um reinício dele; as pessoas que ele conhece estão na configuração dele, no `compose.yaml`. Entrar como o desenvolvedor traz de volta a tela de login com o aviso e o e-mail.
 
-`http://localhost/up` responde com o status da prontidão da API e sem corpo: 503 até as migrations serem aplicadas, e 502 enquanto a API não estiver rodando. A própria API responde à verificação de atividade em `http://127.0.0.1:8080/livez` e à de prontidão em `http://127.0.0.1:8080/readyz`, que o Caddy não encaminha.
+`http://localhost/up` responde com o status da prontidão da API e sem corpo: 503 até as migrations serem aplicadas, e 502 enquanto a API não estiver rodando. A própria API responde à verificação de atividade em `http://127.0.0.1:8080/livez` e à de prontidão em `http://127.0.0.1:8080/readyz`, que o Caddy não encaminha. Em um servidor, o comando `probe-readiness` do binário da API pergunta o mesmo à API do seu container, como verificação de saúde do Compose, já que a imagem não tem shell.
 
 Uma instalação nova não tem usuário nem consultoria. `task issue-setup-code` emite o código de configuração que abre a configuração inicial e mostra, na saída do próprio comando, o código, quando ele deixa de funcionar, o que ele abre e o endereço da configuração inicial. O código vale por uma hora, e um novo encerra o anterior. Só o seu hash é guardado, então um código perdido não pode ser lido de volta: emita outro. Em um servidor, o mesmo comando do binário da API, `issue-setup-code`, roda dentro do container da API. O app recebe o código no endereço da configuração inicial, `/setup`: até a configuração inicial ser concluída, todo endereço do app leva até lá. Depois de concluída, o mesmo comando é o caminho de volta quando nenhum administrador consegue entrar: o código que ele emite abre `/setup` no passo do administrador e cadastra um novo, e nenhum usuário que existe é alterado.
 
@@ -403,18 +406,22 @@ Os comandos, executados na raiz do repositório:
 | `task migrate` | Aplica as migrations pendentes no banco de desenvolvimento. Uma segunda execução não aplica nada |
 | `task issue-setup-code` | Emite um código de configuração no banco de desenvolvimento e o mostra, com quando deixa de funcionar, o que abre e o endereço da configuração inicial |
 | `task seed` | Preenche o banco de desenvolvimento com a consultoria fictícia e a sua administradora, pelos casos de uso da configuração inicial, para o app abrir na tela de login. Em um banco cuja configuração inicial foi concluída, não altera nada |
-| `task seed:image` | Constrói a imagem do seed, o serviço `seed` do `compose.yaml`, que o staging executa, e não publica nada. O pipeline a executa em todo pull request |
+| `task seed:image` | Constrói a imagem do seed, `software-factory-manager-seed:servers`, que o staging executa, e não publica nada. O pipeline a executa em todo pull request |
+| `task api:image` | Constrói a imagem da API, `software-factory-manager-api:servers`, que os servidores executam com cada comando do binário, e não publica nada. O pipeline a executa em todo pull request |
+| `task caddy:image` | Gera o app web com o `task web:build` e, em seguida, a imagem do Caddy dos servidores com o app dentro, `software-factory-manager-caddy:servers`, e não publica nada. O pipeline a executa em todo pull request |
 | `task dev` | Inicia a API, o worker e o Vite juntos. O app abre em `http://localhost`, pelo Caddy |
 | `task api` | Inicia só a API, em `http://127.0.0.1:8080` |
 | `task worker` | Inicia só o worker, que executa os trabalhos do banco de desenvolvimento. Ele para na hora quando há uma migration pendente |
 | `task web` | Inicia só o Vite, na porta 5173, atrás do Caddy |
 | `task api:build` | Gera o binário da API em `apps/api/bin` |
+| `task web:build` | Gera o app web para os servidores em `apps/web/dist`, com uma cópia Brotli ao lado de cada arquivo de texto |
 | `task api:test` | Inicia os serviços e roda os testes em Go. Um teste que precisa do PostgreSQL cria nele o próprio banco temporário; um teste do armazenamento de arquivos grava objetos próprios no bucket do Garage e os remove; um teste do adaptador SMTP envia ao Mailpit, para um endereço só dele, e lê o e-mail de volta pela API do Mailpit; um teste do login por um provedor entra no Dex, conduzindo a página de login dele por HTTP. Os argumentos depois de `--` substituem a lista de pacotes |
 | `task api:test:resend` | Roda os testes do adaptador do Resend contra o próprio Resend, enviando aos endereços de teste dele, que não entregam nada, com a chave em `RESEND_TEST_API_KEY`. Sem a chave, eles são pulados. O workflow agendado `resend.yml` os roda todo dia, nunca um pull request |
 | `task db:clean` | Apaga os bancos que os testes em Go deixam no PostgreSQL de desenvolvimento, os de nome `test_...` e `testdb_...`: o banco de um teste que falhou ou foi interrompido, e um template do pgtestdb para cada estado que as migrações tiveram. Nenhum outro banco é tocado, nem o `software_factory` nem o `software_factory_e2e`. Rode quando nenhum teste estiver rodando, de vez em quando ou quando a lista de bancos crescer: um banco ainda em uso não é apagado, e o comando para nele |
 | `task api:lint` | Roda o lint do código Go e verifica o formato, os imports entre camadas e entre áreas de domínio, o `else` e o nível de aninhamento |
 | `task api:format` | Reescreve os arquivos Go como o formatador pede |
 | `task versions:check` | Verifica se toda versão fixada no repositório é exata: sem intervalo, sem `latest`, sem tag flutuante |
+| `task compose:check` | Verifica o arquivo do Compose de staging com `docker compose config --quiet`, que não imprime nada |
 | `task workflows:check` | Verifica os arquivos de workflow com o actionlint e o zizmor, cada um rodado a partir da sua imagem Docker |
 | `task api:generate` | Gera, com o sqlc, o código Go dos adaptadores `postgres` a partir dos arquivos SQL de cada um. O resultado entra no commit |
 | `task api:generate:check` | Falha quando o código gerado pelo sqlc que está no repositório ficou desatualizado |
@@ -429,7 +436,7 @@ Os comandos, executados na raiz do repositório:
 | `task web:imports` | Falha quando um import do app quebra a sua regra de dependências, com o dependency-cruiser |
 | `task web:knip` | Falha com um arquivo, um export ou uma dependência do app que nada usa, com o Knip |
 | `task e2e` | Roda o teste de ponta a ponta da configuração inicial e do login no Chromium, pelo Caddy, com o Playwright: a configuração inicial, um login pelo Dex, o shell e o logout, um login com um código lido no Mailpit e os limites do Caddy. Ele inicia os serviços, entre eles o Mailpit e o Dex, gera o binário da API, reinicia o Caddy para que os limites comecem vazios, cria vazio o banco `software_factory_e2e` e aplica as migrations, e cria o bucket `software-factory-e2e-files` no Garage na sua primeira execução; o Playwright inicia a API, o worker e o Vite nesse banco e nesse bucket e os encerra no fim. O banco de desenvolvimento e o bucket dele não são tocados. As portas 8080 e 5173 precisam estar livres: pare o `task dev` antes. Um teste que falha deixa o seu trace em `apps/web/test-results`, que o `vp exec playwright show-trace <arquivo>`, rodado em `apps/web`, abre |
-| `task check` | Roda todas as verificações de um pull request: as versões exatas, a verificação dos arquivos de workflow, a verificação do cliente gerado, as de formato, lint e tipos de `apps/web`, a sua regra de dependências, o seu código sem uso, as chaves de tradução ausentes e os testes do app e, em seguida, o lint da API, a verificação do código gerado, a verificação da especificação OpenAPI, a verificação das listas do app, o lint e o relatório de mudanças incompatíveis da especificação, o build e os testes da API, e o teste de ponta a ponta. Por causa do teste de ponta a ponta, precisa das portas 8080 e 5173 livres e reinicia o Caddy: pare o `task dev` antes |
+| `task check` | Roda todas as verificações de um pull request: as versões exatas, a verificação dos arquivos de workflow, a verificação do cliente gerado, as de formato, lint e tipos de `apps/web`, a sua regra de dependências, o seu código sem uso, as chaves de tradução ausentes e os testes do app e, em seguida, o lint da API, a verificação do código gerado, a verificação da especificação OpenAPI, a verificação das listas do app, o lint e o relatório de mudanças incompatíveis da especificação, o build da API, o build do app web e as três imagens com que um commit é publicado, os testes da API, e o teste de ponta a ponta. Por causa do teste de ponta a ponta, precisa das portas 8080 e 5173 livres e reinicia o Caddy: pare o `task dev` antes |
 | `task check:quick` | Roda tudo o que o `task check` roda, menos o teste de ponta a ponta, para o uso do dia a dia. Não precisa de porta livre nem reinicia o Caddy, então roda ao lado do `task dev`. Antes de um pull request, rode o `task check` |
 | `task check:fix` | Roda as verificações de formato, lint e tipos de `apps/web` e corrige o que for possível |
 
@@ -439,27 +446,43 @@ O contrato REST é o arquivo `apps/api/openapi.yaml`. Ele é gerado a partir das
 
 ### Build
 
-- **Backend.** Um binário Go, em uma imagem: a API e os comandos `worker` e `migrate`. As migrations vão embutidas nele.
+- **Backend.** Um binário Go, em uma imagem: a API e os comandos `worker`, `migrate`, `issue-setup-code` e `probe-readiness`. As migrations vão embutidas nele.
 - **Seed e substituto do provedor de LLM.** Cada um é um pacote `main` próprio no mesmo módulo Go, com a própria imagem. A produção não roda nenhum dos dois.
 - **Frontend.** O Vite+ gera os arquivos estáticos de `apps/web`, com uma cópia Brotli ao lado de cada arquivo de texto. O Caddy os serve.
-- **Caddy e PostgreSQL.** As duas imagens são construídas neste repositório: a do Caddy com um plugin de limite de requisições, a do PostgreSQL com o pgBackRest.
+- **Caddy e PostgreSQL.** As duas imagens são construídas neste repositório: a do Caddy com um plugin de limite de requisições e, nos servidores, com o app web gerado dentro; a do PostgreSQL com o pgBackRest.
 - **Código gerado.** A pipeline verifica se ele está atualizado: o código Go que o sqlc gera a partir dos arquivos SQL, a especificação OpenAPI gerada a partir do código Go e o cliente que o orval gera a partir dessa especificação.
 - **Versões.** O build instala a partir do `go.sum` e do `pnpm-lock.yaml` e falha quando eles mudariam.
 - **Imagens.** O GitHub Actions as constrói, marca cada uma com o hash do commit e envia para o registro de containers do GitHub. A produção só roda imagem construída a partir da `main`. As imagens de uma release levam também o número dela.
 
-O `task api:build` gera o binário da API em `apps/api/bin`. A imagem do seed é construída a partir de `apps/api/cmd/seed/Dockerfile` pelo serviço `seed` do `compose.yaml`, que fica em um perfil próprio do Compose para que o `task services` não o inicie: `docker compose --profile seed run --rm --build seed` a constrói e a roda no banco de desenvolvimento. Os outros comandos estão _A definir_, e cada um será escrito com o que ele constrói.
+O `task api:build` gera o binário da API em `apps/api/bin`. A imagem do seed é construída a partir de `apps/api/cmd/seed/Dockerfile` pelo serviço `seed` do `compose.yaml`, que fica em um perfil próprio do Compose para que o `task services` não o inicie: `docker compose --profile seed run --rm --build seed` a constrói e a roda no banco de desenvolvimento. O `task api:image` constrói a imagem da API a partir de `apps/api/cmd/api/Dockerfile`, e o `task caddy:image` gera o app web, com o `task web:build`, e depois o estágio `servers` de `deploy/caddy/Dockerfile`, com a saída do build como contexto; o desenvolvimento constrói o estágio `development` do mesmo arquivo, que não tem o app. As três são construídas em todo pull request e não são publicadas em lugar nenhum. Os outros comandos estão _A definir_, e cada um será escrito com o que ele constrói.
 
 ### Deploy
 
 Toda mudança chega à `main` por um pull request, e um merge na `main` é publicado em produção assim que a pipeline passa. O GitHub Actions constrói as imagens, envia para o registro de containers do GitHub e entra no servidor por SSH para baixá-las e reiniciar os serviços do Compose. Os segredos de cada ambiente ficam nos Environments do GitHub, e a publicação os grava em um arquivo de variáveis no servidor (veja o [ADR-0019](docs/adr/0019-three-environments-with-staging-on-a-server-created-on-demand.md)).
 
-Para ver uma branch antes do merge, dê ao pull request dela o rótulo `staging`. Um servidor é criado com a branch, um banco novo e os dados do seed. Ele é destruído quando o rótulo sai ou o pull request fecha, e nunca vive mais de 24 horas.
+A homologação é um servidor que só existe enquanto um pull request é experimentado nele, e só custa enquanto está ligada (veja o [`docs/providers.md`](docs/providers.md)). Ela é ligada e desligada à mão, do checkout principal ou de uma worktree dele:
+
+```sh
+task staging:on      # cria o servidor, espera até ele ficar pronto e dá ao GitHub o que chega até ele
+task staging:status  # ligada ou desligada, desde quando, o endereço, os nomes de host e o pull request com o rótulo
+task staging:off     # destrói o servidor, com o endereço e a chave de deploy, e os tira do GitHub
+```
+
+A máquina precisa do `HETZNER_TOKEN` no `.env` do checkout principal: um token de API do projeto `software-factory-manager-staging` da Hetzner, com permissão de leitura e escrita. Ela também precisa do `gh` logado como o mantenedor, com as permissões que a linha "Token of `gh` on the maintainer's machine" dá, na seção GitHub do [`docs/providers.md`](docs/providers.md#github). O `task staging:on` garante que o Environment `staging` do GitHub e o rótulo `staging` existem, cria o servidor com as escolhas do `deploy/server.staging.yaml`, preparado pelo `deploy/cloud-init.yaml`, e termina quando o servidor responde ao SSH com a chave de host que recebeu, o cloud-init o preparou e o Environment `staging` do GitHub tem o que a pipeline precisa para chegar até ele: o endereço, a chave de host e a chave de deploy do servidor, e a senha do Mailpit. Quando isso falha, ele destrói o servidor e tira esses valores do GitHub antes de relatar a falha. Ligar a homologação quando ela está ligada não cria nada e dá ao GitHub os mesmos valores de novo; desligá-la quando está desligada não destrói nada. Nada a desliga sozinho: quando ela fica ligada por mais de 24 horas, o workflow agendado `staging-reminder.yml` falha a cada seis horas, o que avisa o mantenedor, até ela ser desligada. O `task staging:off` deixa no GitHub só a senha do Mailpit.
+
+A senha do Mailpit é escolhida na primeira vez que a homologação é ligada e fica no `.env` do checkout principal, como `STAGING_MAILPIT_PASSWORD`: leia-a ali, porque o GitHub nunca devolve um segredo. Toda vez que a homologação é ligada depois disso, ela usa a mesma senha.
+
+Enquanto a homologação está ligada, o checkout principal guarda a chave de deploy dela em `.servers/staging/`, que o git ignora, e `ssh -F .servers/staging/ssh_config staging`, rodado ali, entra no servidor como o usuário de deploy. Os nomes de host dela ficam sob o endereço dela, escrito para o `sslip.io`, o que é provisório até o domínio ser registrado (veja o [`docs/providers.md`](docs/providers.md#sslipio)): eles mudam a cada vez que a homologação é ligada, e o `task staging:status` os mostra.
+
+Um pull request deste repositório com o rótulo `staging` é publicado na homologação assim que as verificações passam, pelo job `Publish to staging` do `ci.yml`: ele constrói as três imagens do commit que as verificações testaram, envia para o registro de containers do GitHub, com a tag do hash dele, e roda `go run ./tools/environment publish staging`, a publicação da mesma ferramenta. Ela entra no servidor por SSH como o usuário de deploy, confiando só na chave de host dele, copia os arquivos do Compose e a configuração do Caddy, grava o arquivo de variáveis, baixa as imagens, para a API e o worker, apaga o PostgreSQL, o Garage e o Mailpit com os dados deles, inicia os três de novo com o Caddy, aplica as migrations, roda o seed, inicia a API e o worker e espera até o `/up` responder por HTTPS. Um comentário no pull request dá então o endereço do app e do Mailpit, cujo usuário é `maintainer` e cuja senha é a `STAGING_MAILPIT_PASSWORD`. Os dados são os do seed: entre como `seed+admin@fabrica.example` com um código de login, lido no Mailpit. Quando a homologação está desligada, o job não publica nada, avisa em uma notice e passa. Só uma publicação roda por vez, e uma que está rodando nunca é cancelada, a não ser que o rótulo dela seja tirado à mão e posto de novo enquanto ela publica, o que publica o pull request de novo.
+
+A homologação mostra um pull request por vez. Pôr o rótulo `staging` em um pull request aberto roda as verificações dele de novo e o publica; pôr outro rótulo não publica nada. Uma publicação tira o rótulo de todos os outros pull requests abertos que o têm, com um comentário ali dizendo qual pull request a homologação mostra agora, para que um push em um deles não publique nada; pôr o rótulo de novo nele o publica de novo. Um pull request que perdeu o rótulo, ou foi fechado, antes de a publicação dele começar não é publicado.
 
 Voltar a uma versão anterior é um workflow manual que publica um commit anterior da `main`, indicado pelo hash ou por uma release.
 
 Uma release dá um número e notas a um marco que já está em produção. Ela é um pull request que muda o `VERSION` e o `CHANGELOG.md`. Depois que ele é publicado, a pipeline cria a tag, a release no GitHub e a marca numerada nas imagens (veja o [ADR-0023](docs/adr/0023-a-release-names-a-milestone-already-in-production.md)). A primeira release, a 0.1.0, ainda está por vir.
 
-Um deploy reinicia a única instância da API. A API termina as requisições em andamento antes de sair (veja Shutdown em [`CODING_STANDARDS.md`](CODING_STANDARDS.md)), então o arquivo do Compose dá a ela um `stop_grace_period` de 30 segundos, e o Caddy segura as requisições novas por até 30 segundos (`lb_try_duration`) até a nova instância aceitar conexões.
+Um deploy reinicia a única instância da API. A API termina as requisições em andamento antes de sair (veja Shutdown em [`CODING_STANDARDS.md`](CODING_STANDARDS.md)), então o arquivo do Compose dá a ela um `stop_grace_period` de 45 segundos. O Caddy não segura requisição nenhuma enquanto isso: até a nova instância aceitar conexões, ele responde a uma requisição para `/api` com um 502 no formato de erro da API (veja API out of reach no [`CODING_STANDARDS.md`](CODING_STANDARDS.md)).
 
 Antes de a API subir, um serviço de execução única do Compose aplica as migrations pendentes do banco, e a API só sobe se ele terminar bem. Quando há migration pendente, o deploy gera um `pg_dump` antes, porque as migrations não têm caminho de volta (veja o [ADR-0015](docs/adr/0015-hand-written-sql-checked-by-sqlc-and-forward-only-migrations.md)).
 

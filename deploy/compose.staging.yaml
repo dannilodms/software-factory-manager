@@ -1,0 +1,251 @@
+# Staging: what runs on the server where the maintainer tries one pull
+# request (ADR-0019). Each service extends deploy/compose.base.yaml, which
+# holds the tag of every image and what a service is wherever it runs. Rules:
+# Compose files, Seed, Servers and Secrets in Environments, and Publishing in
+# Pipeline, in CODING_STANDARDS.md.
+#
+# It declares PostgreSQL, Garage with the step that sets its cross-origin
+# rule, Mailpit, Caddy, the migration and the seed as steps that run once,
+# and the API and the worker. It declares no Dex, no River panel, no
+# telemetry and no LLM stand-in.
+#
+# The publish copies this file, the base file and the two Caddyfiles of
+# deploy/ into one folder of the server, writes the variables file beside
+# them, and drives the services by name. Every value comes from that file,
+# except what this file names itself: the services of its network and their
+# ports. Each service receives only the variables its command reads, so the
+# API never receives the connection of the migration role, and the migration
+# never receives the one of the API role. A command that prints the
+# configuration with its values, `docker compose config` without --quiet,
+# never runs on the server or in the pipeline.
+#
+# The data of PostgreSQL and Garage is in the volumes postgres-data and
+# garage-data, which every publish removes, with their containers, to start
+# from the seed again. Mailpit keeps its e-mails in its container, which
+# every publish removes too. The certificates of Caddy are in caddy-data, which the
+# publish keeps while the server lives: `docker compose down --volumes`
+# would remove it too, and is never run.
+#
+# Only Caddy publishes ports: 80 and 443 over TCP, and 443 over UDP for
+# HTTP/3, which the firewall of the server lets in too. Docker opens a
+# published port past that firewall, so no other service publishes one:
+# they reach each other on the network of the project.
+
+name: software-factory-manager-staging
+
+# The connection of the API role, which the API, the worker and the seed use,
+# and the settings of its pool.
+x-database-of-the-api: &database-of-the-api
+  DATABASE_URL: postgres://api:${POSTGRES_API_PASSWORD:?Set POSTGRES_API_PASSWORD, as .env.example does}@postgres:5432/software_factory?sslmode=disable
+  DATABASE_POOL_MAX_SIZE: ${DATABASE_POOL_MAX_SIZE:-}
+  DATABASE_STATEMENT_TIMEOUT: ${DATABASE_STATEMENT_TIMEOUT:-}
+  DATABASE_IDLE_IN_TRANSACTION_TIMEOUT: ${DATABASE_IDLE_IN_TRANSACTION_TIMEOUT:-}
+
+# The file storage: Garage on the network of the project, for the API and
+# the worker, and its host name of the browser, which Caddy forwards to it.
+x-file-storage: &file-storage
+  FILE_STORAGE_URL: http://garage:3900
+  FILE_STORAGE_PUBLIC_URL: ${FILE_STORAGE_PUBLIC_URL:?Set FILE_STORAGE_PUBLIC_URL, as .env.example does}
+  FILE_STORAGE_REGION: ${FILE_STORAGE_REGION:?Set FILE_STORAGE_REGION, as .env.example does}
+  FILE_STORAGE_BUCKET: ${FILE_STORAGE_BUCKET:?Set FILE_STORAGE_BUCKET, as .env.example does}
+  FILE_STORAGE_ACCESS_KEY_ID: ${FILE_STORAGE_ACCESS_KEY_ID:?Set FILE_STORAGE_ACCESS_KEY_ID, as .env.example does}
+  FILE_STORAGE_SECRET_ACCESS_KEY: ${FILE_STORAGE_SECRET_ACCESS_KEY:?Set FILE_STORAGE_SECRET_ACCESS_KEY, as .env.example does}
+
+services:
+  postgres:
+    extends:
+      file: compose.base.yaml
+      service: postgres
+    restart: unless-stopped
+
+  garage:
+    extends:
+      file: compose.base.yaml
+      service: garage
+    restart: unless-stopped
+
+  garage-cors:
+    extends:
+      file: compose.base.yaml
+      service: garage-cors
+    depends_on:
+      garage:
+        condition: service_healthy
+
+  # Keeps every e-mail the worker sends, the login codes among them, inside
+  # its container, which every publish removes, and shows them at the host
+  # name of Mailpit, through Caddy.
+  mailpit:
+    extends:
+      file: compose.base.yaml
+      service: mailpit
+    restart: unless-stopped
+
+  # The three host names over HTTPS, with the built web app inside the image.
+  # What it does is in deploy/Caddyfile.staging.
+  caddy:
+    extends:
+      file: compose.base.yaml
+      service: caddy
+    image: ghcr.io/dannilodms/software-factory-manager-caddy:${COMMIT:?Set COMMIT, the hash of the commit whose images run}
+    restart: unless-stopped
+    depends_on:
+      # The host name of the files leads to a bucket that has its rule.
+      garage-cors:
+        condition: service_completed_successfully
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile.staging:/etc/caddy/Caddyfile:ro
+      - ./delivery.caddyfile:/etc/caddy/delivery.caddyfile:ro
+      # The certificates and the account at the certificate authorities.
+      - caddy-data:/data
+      - caddy-config:/config
+    environment:
+      # Caddy starts the trace of each request and exports nothing: staging
+      # has no telemetry containers.
+      OTEL_TRACES_EXPORTER: none
+      APP_ORIGIN: ${APP_ORIGIN:?Set APP_ORIGIN, as .env.example does}
+      FILE_STORAGE_PUBLIC_URL: ${FILE_STORAGE_PUBLIC_URL:?Set FILE_STORAGE_PUBLIC_URL, as .env.example does}
+      MAILPIT_PUBLIC_URL: ${MAILPIT_PUBLIC_URL:?Set MAILPIT_PUBLIC_URL, as .env.example does}
+      MAILPIT_PASSWORD_HASH: ${MAILPIT_PASSWORD_HASH:?Set MAILPIT_PASSWORD_HASH, as .env.example says}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+
+  # Applies the pending migrations, as the migration role, and exits.
+  migrate:
+    extends:
+      file: compose.base.yaml
+      service: migrate
+    image: ghcr.io/dannilodms/software-factory-manager-api:${COMMIT:?Set COMMIT, the hash of the commit whose images run}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-}
+      MIGRATION_DATABASE_URL: postgres://migration:${POSTGRES_MIGRATION_PASSWORD:?Set POSTGRES_MIGRATION_PASSWORD, as .env.example does}@postgres:5432/software_factory?sslmode=disable
+
+  # Fills the empty database with the fictitious consultancy and its users,
+  # and exits. It refuses a database with a migration pending.
+  seed:
+    extends:
+      file: compose.base.yaml
+      service: seed
+    image: ghcr.io/dannilodms/software-factory-manager-seed:${COMMIT:?Set COMMIT, the hash of the commit whose images run}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  # The API, behind Caddy. Its readiness fails while a migration is pending.
+  api:
+    extends:
+      file: compose.base.yaml
+      service: api
+    image: ghcr.io/dannilodms/software-factory-manager-api:${COMMIT:?Set COMMIT, the hash of the commit whose images run}
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      garage:
+        condition: service_healthy
+    environment:
+      <<: [*database-of-the-api, *file-storage]
+      # Every interface of the container, where Caddy reaches it; the health
+      # check asks the loopback address.
+      API_LISTEN_ADDRESS: ":8080"
+      SHUTDOWN_DRAIN_DEADLINE: ${SHUTDOWN_DRAIN_DEADLINE:-}
+      LOG_LEVEL: ${LOG_LEVEL:-}
+      HEALTH_CHECK_TIMEOUT: ${HEALTH_CHECK_TIMEOUT:-}
+      APP_ORIGIN: ${APP_ORIGIN:?Set APP_ORIGIN, as .env.example does}
+      LOGIN_CODE_KEY: ${LOGIN_CODE_KEY:?Set LOGIN_CODE_KEY, as .env.example does}
+
+  # The worker, which sends the e-mails to Mailpit and cleans up the file
+  # storage. It stops at once while a migration is pending.
+  worker:
+    extends:
+      file: compose.base.yaml
+      service: worker
+    image: ghcr.io/dannilodms/software-factory-manager-api:${COMMIT:?Set COMMIT, the hash of the commit whose images run}
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      garage:
+        condition: service_healthy
+      mailpit:
+        condition: service_healthy
+    environment:
+      <<: [*database-of-the-api, *file-storage]
+      LOG_LEVEL: ${LOG_LEVEL:-}
+      LOGIN_CODE_KEY: ${LOGIN_CODE_KEY:?Set LOGIN_CODE_KEY, as .env.example does}
+      WORKER_LIGHT_QUEUE_MAX_JOBS: ${WORKER_LIGHT_QUEUE_MAX_JOBS:-}
+      WORKER_HEAVY_QUEUE_MAX_JOBS: ${WORKER_HEAVY_QUEUE_MAX_JOBS:-}
+      WORKER_SHUTDOWN_DEADLINE: ${WORKER_SHUTDOWN_DEADLINE:-}
+      # Mailpit, on the network of the project.
+      EMAIL_SENDER: smtp
+      EMAIL_SMTP_ADDRESS: mailpit:1025
+      EMAIL_FROM_ADDRESS: ${EMAIL_FROM_ADDRESS:?Set EMAIL_FROM_ADDRESS, as .env.example does}
+      EMAIL_FROM_NAME: ${EMAIL_FROM_NAME:?Set EMAIL_FROM_NAME, as .env.example does}
+
+volumes:
+  # Removed by every publish.
+  postgres-data:
+  garage-data:
+  # Kept while the server lives.
+  caddy-data:
+  caddy-config:
+
+# The same configs as in compose.yaml, declared again because `extends`
+# copies none: a change goes into both.
+configs:
+  # One node, which keeps its data in the volume and holds every copy. The
+  # secret its nodes share comes from the environment. Path-style addresses
+  # only: no root domain is set, so a bucket is never read from a host name.
+  # It listens on IPv4, which a container has wherever Docker runs.
+  garage:
+    content: |
+      metadata_dir = "/var/lib/garage/meta"
+      data_dir = "/var/lib/garage/data"
+      db_engine = "sqlite"
+      replication_factor = 1
+      rpc_bind_addr = "0.0.0.0:3901"
+      rpc_public_addr = "127.0.0.1:3901"
+
+      [s3_api]
+      s3_region = "${FILE_STORAGE_REGION:?Set FILE_STORAGE_REGION, as .env.example does}"
+      api_bind_addr = "0.0.0.0:3900"
+
+  # PutBucketCors of the S3 API, signed with the key of the API. A browser
+  # asks before it sends a file to another origin; Garage answers 403 to an
+  # origin the rule does not list, and the browser sends nothing.
+  garage-cors:
+    content: |
+      set -eu
+      rule="<CORSConfiguration><CORSRule>
+        <AllowedOrigin>$${APP_ORIGIN}</AllowedOrigin>
+        <AllowedMethod>PUT</AllowedMethod>
+        <AllowedMethod>GET</AllowedMethod>
+        <AllowedHeader>content-type</AllowedHeader>
+        <ExposeHeader>ETag</ExposeHeader>
+        <MaxAgeSeconds>3600</MaxAgeSeconds>
+      </CORSRule></CORSConfiguration>"
+      curl --silent --show-error --fail-with-body \
+        --aws-sigv4 "aws:amz:$${FILE_STORAGE_REGION}:s3" \
+        --user "$${FILE_STORAGE_ACCESS_KEY_ID}:$${FILE_STORAGE_SECRET_ACCESS_KEY}" \
+        --request PUT --header "Content-Type: application/xml" --data-binary "$${rule}" \
+        "http://garage:3900/$${FILE_STORAGE_BUCKET}?cors"
+      echo "the bucket $${FILE_STORAGE_BUCKET} accepts files from $${APP_ORIGIN}"
+
+  # What only a superuser can do, done when the data directory is created,
+  # which in staging is every publish: the two roles of ADR-0015, the
+  # database handed to the migration role, and pg_stat_statements, which is
+  # not a trusted extension. Everything after this is a migration.
+  postgres-roles:
+    content: |
+      \getenv migration_password POSTGRES_MIGRATION_PASSWORD
+      \getenv api_password POSTGRES_API_PASSWORD
+      CREATE ROLE migration LOGIN PASSWORD :'migration_password';
+      CREATE ROLE api LOGIN PASSWORD :'api_password';
+      ALTER DATABASE :"DBNAME" OWNER TO migration;
+      CREATE EXTENSION pg_stat_statements;

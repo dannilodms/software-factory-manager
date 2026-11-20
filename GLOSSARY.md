@@ -139,3 +139,13 @@ _Avoid_: Machine translation, suggestion
 **On-demand translation**:
 An automatic rendering of free text into the reader's language, shown at their request. It never replaces the original.
 _Avoid_: Auto-translation, translated version
+
+### Environments
+
+**Staging**:
+The environment where the maintainer tries one pull request before merging it, on a server of its own that holds only the seed's data. Turning it on creates that server and turning it off destroys it, both by hand, so it costs only while it is on.
+_Avoid_: Preview, homologation, QA environment, test server, sandbox
+
+**Publish**:
+To put the code of one commit on a server and restart the system there. A pull request with the staging label is published to staging, whose data starts again from the seed; a merge into main is published to production.
+_Avoid_: Deploy, ship, release, upload, provision

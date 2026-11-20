@@ -1,0 +1,162 @@
+# The rules of delivery, the one home of how responses travel from the server
+# to browsers and agents: the masking of addresses in the logs, compression,
+# the limits of the setup code and of the login code, the cache headers, the
+# security headers and the answers of an API out of reach. The Caddyfile of
+# each environment imports this file, deploy/Caddyfile in development and
+# deploy/Caddyfile.staging in staging, and each of its sites imports the
+# snippets below that apply to it. Rules: Delivery in CODING_STANDARDS.md.
+#
+# A snippet is a block with a name in parentheses. `import <name> <args>`
+# puts its directives where the import is, with `{args[0]}` replaced by the
+# first argument, when the Caddyfile is read.
+
+# Privacy in Observability: the output of Caddy carries the address of a
+# caller cut down to its network, never whole. The rate-limit plugin writes
+# it as remote_ip when it refuses a request, and Caddy writes the request of
+# an error with remote_ip and client_ip. Every line goes through the filter,
+# which keeps 24 bits of an IPv4 address and 48 of an IPv6 one. Imported in
+# the global options.
+(logs-without-whole-addresses) {
+	log default {
+		format filter {
+			wrap json
+			fields {
+				remote_ip ip_mask 24 48
+				client_ip ip_mask 24 48
+				request>remote_ip ip_mask 24 48
+				request>client_ip ip_mask 24 48
+			}
+		}
+	}
+}
+
+# The site of the app, wherever it runs: compression, /up and /api, which go
+# to the API at {args[0]}, the two limits, and the answers of Caddy in the
+# error format of the API. The site that imports it serves the app itself in
+# a `handle` of its own, which takes every other path.
+(site-of-the-app) {
+	# The trace of a request starts here. Its identifier reaches the API in
+	# the traceparent header, and is the trace_id of the answers below.
+	tracing
+
+	# zstd or gzip, from the Accept-Encoding of the request, for a response
+	# of 512 bytes or more of a type that compresses. No `match` block: it
+	# would replace the whole list of types.
+	encode
+
+	# The readiness of the API, with its status and no body. When the API
+	# does not answer, Caddy answers 502, with no body either. Liveness and
+	# readiness themselves are never forwarded: they are outside /api.
+	handle /up {
+		rewrite * /readyz
+		reverse_proxy {args[0]}
+	}
+
+	@api path /api /api/*
+	handle @api {
+		# Set as the response leaves, so that it replaces any the API sent.
+		header >Cache-Control no-store
+
+		# Each POST of the setup checks a setup code: ten a minute for each
+		# IP address, counted together. Past it, the error below answers.
+		# The two operations of the login code, asking for one and checking
+		# it, have a zone of their own: ten a minute for each IP address,
+		# counted together.
+		rate_limit {
+			zone setup {
+				match {
+					method POST
+					path /api/setup/*
+				}
+				key {remote_host}
+				events 10
+				window 1m
+			}
+			zone login {
+				match {
+					method POST
+					path /api/session/login_code /api/session/login_code/check
+				}
+				key {remote_host}
+				events 10
+				window 1m
+			}
+		}
+
+		reverse_proxy {args[0]}
+	}
+
+	# The 429 of the limit, in the error format of the API: the schema
+	# Problem of apps/api/openapi.yaml. Only the limit returns one.
+	handle_errors 429 {
+		header Content-Type application/problem+json
+		header Cache-Control no-store
+		respond `{"title":"Too Many Requests","status":429,"code":"too_many_requests","params":{},"trace_id":"{http.vars.trace_id}"}` 429
+	}
+
+	# The API cannot be reached: under /api, Caddy answers in the error format
+	# too, with the code the API would give the status. /up keeps its status
+	# and no body.
+	handle_errors 502 503 504 {
+		@apiFailure path /api /api/*
+		handle @apiFailure {
+			map {err.status_code} {problem_code} {
+				502 bad_gateway
+				503 service_unavailable
+				504 gateway_timeout
+			}
+			header Content-Type application/problem+json
+			header Cache-Control no-store
+			respond `{"title":"{err.status_text}","status":{err.status_code},"code":"{problem_code}","params":{},"trace_id":"{http.vars.trace_id}"}` {err.status_code}
+		}
+	}
+}
+
+# The built web app, from the folder of the Caddy image of the servers, /srv,
+# for every path the site of the app does not forward to the API. Vite writes
+# every file of the build but index.html under /assets/, with a hash of its
+# content in its name, and the app has no folder of files copied as they are:
+# a file there never changes, and every other one is revalidated, so a
+# publish shows on the next load. A path that is no file is a route of the
+# app, answered with index.html. A file under /assets/ that does not exist is
+# a 404, not the app. Each header is set as the response leaves, so that a
+# failure is never kept by the browser. The Brotli copy the build wrote
+# beside a file goes to a browser that accepts Brotli; any other gets the
+# file through `encode`.
+(the-built-app) {
+	root * /srv
+
+	@hashed path /assets/*
+	handle @hashed {
+		header >Cache-Control "public, max-age=31536000, immutable"
+		file_server {
+			precompressed br
+		}
+	}
+
+	handle {
+		header >Cache-Control no-cache
+		try_files {path} /index.html
+		file_server {
+			precompressed br
+		}
+	}
+}
+
+# The security headers of the site of the app, where Caddy serves the built
+# app. Scripts, styles, fonts and connections come from the origin of the
+# app only, plus the file storage at {args[0]} for connections, images and
+# media, and the images a screen shows from a file chosen on the machine
+# before it is sent (blob:). No inline script and no eval. Inline style
+# elements are allowed, and nothing else inline: Base UI writes one to hide
+# a scrollbar, and input-otp one for the field of a code. The page cannot be
+# shown inside a frame. The app is served over HTTPS only, and sends the
+# address of a page to its own origin only.
+(security-headers) {
+	header {
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; style-src-elem 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' blob: {args[0]}; media-src 'self' blob: {args[0]}; connect-src 'self' {args[0]}; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy same-origin
+	}
+}

@@ -172,7 +172,8 @@ func concludeTheSetup(ctx context.Context, pool *pgxpool.Pool, mailbox config.Ma
 
 const seededText = `Registered the consultancy %s and its administrator, %s.
 The app opens on the login screen. The administrator logs in with the address
-of SEED_MAILBOX tagged +admin, the one the local login provider knows.
+of SEED_MAILBOX tagged +admin: with a login code, which Mailpit receives, or
+through the local login provider, where there is one.
 `
 
 const nothingToDoText = `The setup is concluded: the seed changes nothing.

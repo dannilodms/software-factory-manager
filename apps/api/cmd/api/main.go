@@ -1,6 +1,8 @@
 // Command api is the binary of the backend. With no command it serves the
 // API, `migrate` applies the pending migrations, `issue-setup-code` issues
-// the setup code that opens the setup and `worker` runs the jobs.
+// the setup code that opens the setup, `worker` runs the jobs and
+// `probe-readiness` asks the API whether it is ready, for the health check of
+// its container.
 //
 // Each command wires its own dependencies by hand, in its own file: it reads
 // the configuration, builds what the command needs and passes each part to
@@ -32,6 +34,7 @@ Commands:
   migrate             Apply the pending migrations
   issue-setup-code    Issue the setup code that opens the setup
   worker              Run the jobs
+  probe-readiness     Succeed when the API at API_LISTEN_ADDRESS is ready
 
 The configuration comes from environment variables: see .env.example.
 `
@@ -86,6 +89,7 @@ var commands = map[string]func(ctx context.Context, environment map[string]strin
 	"migrate":          migrate,
 	"issue-setup-code": issueSetupCode,
 	"worker":           workJobs,
+	"probe-readiness":  probeReadiness,
 }
 
 // tracedDatabase starts the tracing of a command, under the service "api",

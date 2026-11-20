@@ -1,0 +1,21 @@
+# The choices of the server of staging, which the tool in
+# apps/api/tools/environment reads when it turns staging on, off, or tells
+# its status (`task staging:on`). Moving staging to another provider changes
+# this file and adds an adapter to the tool; the cloud-init file, the pipeline
+# and the publish stay as they are. Rules: Servers in Environments of
+# CODING_STANDARDS.md.
+
+# The adapter that reaches the provider, which reads its token from a
+# variable of its own: HETZNER_TOKEN, in the .env of the main checkout.
+provider: hetzner
+# Falkenstein, in Germany. Hetzner names a location, not a datacenter.
+region: fsn1
+size: cx23
+# The newest Ubuntu LTS that Docker supports officially: Resolute 26.04 on
+# https://docs.docker.com/engine/install/ubuntu/, read on 2026-11-19, which
+# Hetzner offers as `ubuntu-26.04` since 2026-05-18
+# (https://docs.hetzner.cloud/changelog). The Docker packages of
+# deploy/cloud-init.yaml are built for this release, and change with it.
+system_image: ubuntu-26.04
+# The name of the server at the provider, and of its deploy key there.
+server_name: staging

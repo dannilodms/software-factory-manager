@@ -1,6 +1,8 @@
 # The services the environments share, and the tag of every image. The
 # Compose file of each environment extends the services it runs from here, so
-# a version has one home. Rules: Compose files and Versions in
+# a version has one home, and so does what a service is wherever it runs.
+# What differs by environment, such as a port or an order of start, is in the
+# file of the environment. Rules: Compose files and Versions in
 # CODING_STANDARDS.md.
 #
 # `extends` copies a service and nothing else: the volumes and the configs a
@@ -53,23 +55,96 @@ services:
     # plugin. Development builds it; each environment names it in its file.
     logging: *logging
 
-  # The seed of development and staging (ADR-0019). The image is built in this
-  # repository from apps/api/cmd/seed/Dockerfile, which holds the versions of
-  # what it is built on. Development builds it; staging names the published
-  # image. Production declares no seed.
-  seed:
+  # The binary of the API, which the servers run, one service for each of its
+  # commands: the API itself, the worker and the migration. The image is
+  # built in this repository from apps/api/cmd/api/Dockerfile, which holds
+  # the versions of what it is built on; each server names the image of the
+  # commit it publishes. Development runs the binary on the machine.
+  #
+  # The stop grace period is longer than what the API takes to stop (Shutdown
+  # in CODING_STANDARDS.md): the drain deadline, 20 seconds, then up to 15
+  # for the pool to close and 5 for the last spans to leave. Docker kills the
+  # process once it is over. Readiness feeds the health check: the image has
+  # no shell, so the binary asks itself.
+  api:
+    stop_grace_period: 45s
+    healthcheck:
+      test: [CMD, /api, probe-readiness]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 1s
     logging: *logging
 
-  # The file storage of development and staging (ADR-0017). Production keeps
-  # its files at a provider and declares no Garage.
+  # The worker stops as the API does: the running jobs have
+  # WORKER_SHUTDOWN_DEADLINE, 20 seconds, then the pool and the spans the
+  # same 15 and 5.
+  worker:
+    command: [worker]
+    stop_grace_period: 45s
+    logging: *logging
+
+  # The migration, a step that applies the pending migrations and exits.
+  migrate:
+    command: [migrate]
+    logging: *logging
+
+  # The seed of development and staging (ADR-0019), a step that runs once and
+  # exits. The image is built in this repository from
+  # apps/api/cmd/seed/Dockerfile, which holds the versions of what it is built
+  # on. Development builds it; staging names the published image. Production
+  # declares no seed.
+  seed:
+    environment:
+      # The API role, on the network of Compose.
+      DATABASE_URL: postgres://api:${POSTGRES_API_PASSWORD:?Set POSTGRES_API_PASSWORD, as .env.example does}@postgres:5432/software_factory?sslmode=disable
+      SEED_MAILBOX: ${SEED_MAILBOX:?Set SEED_MAILBOX, as .env.example does}
+    logging: *logging
+
+  # The file storage of development and staging (ADR-0017): the S3 API of
+  # Garage, on one node. When it starts, Garage creates the one bucket and its
+  # key from the variables of the API, if they do not exist yet. Production
+  # keeps its files at a provider and declares no Garage.
   garage:
     image: dxflrs/garage:v2.5.0
+    command: [/garage, server, --single-node, --default-bucket]
+    configs:
+      - source: garage
+        target: /etc/garage.toml
+    environment:
+      GARAGE_RPC_SECRET: ${GARAGE_RPC_SECRET:?Set GARAGE_RPC_SECRET, as .env.example does}
+      GARAGE_DEFAULT_BUCKET: ${FILE_STORAGE_BUCKET:?Set FILE_STORAGE_BUCKET, as .env.example does}
+      GARAGE_DEFAULT_ACCESS_KEY: ${FILE_STORAGE_ACCESS_KEY_ID:?Set FILE_STORAGE_ACCESS_KEY_ID, as .env.example does}
+      GARAGE_DEFAULT_SECRET_KEY: ${FILE_STORAGE_SECRET_ACCESS_KEY:?Set FILE_STORAGE_SECRET_ACCESS_KEY, as .env.example does}
+    volumes:
+      - garage-data:/var/lib/garage
+    healthcheck:
+      # The image has no shell: Garage itself tells whether the bucket exists.
+      test: [CMD, /garage, bucket, info, "${FILE_STORAGE_BUCKET:?Set FILE_STORAGE_BUCKET, as .env.example does}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+      start_interval: 1s
     logging: *logging
 
   # The step that gives the bucket of Garage its cross-origin rule, through
-  # the S3 API, signed by curl. It runs once and exits.
+  # the S3 API, signed by curl: the browser may send and fetch files from the
+  # origin of the app only. It runs once and exits, and run again it writes
+  # the same rule.
   garage-cors:
     image: curlimages/curl:8.23.0
+    entrypoint: [sh, /garage-cors.sh]
+    configs:
+      - source: garage-cors
+        target: /garage-cors.sh
+    environment:
+      APP_ORIGIN: ${APP_ORIGIN:?Set APP_ORIGIN, as .env.example does}
+      FILE_STORAGE_REGION: ${FILE_STORAGE_REGION:?Set FILE_STORAGE_REGION, as .env.example does}
+      FILE_STORAGE_BUCKET: ${FILE_STORAGE_BUCKET:?Set FILE_STORAGE_BUCKET, as .env.example does}
+      FILE_STORAGE_ACCESS_KEY_ID: ${FILE_STORAGE_ACCESS_KEY_ID:?Set FILE_STORAGE_ACCESS_KEY_ID, as .env.example does}
+      FILE_STORAGE_SECRET_ACCESS_KEY: ${FILE_STORAGE_SECRET_ACCESS_KEY:?Set FILE_STORAGE_SECRET_ACCESS_KEY, as .env.example does}
     logging: *logging
 
   # The e-mail server of development and staging (ADR-0019): it takes every

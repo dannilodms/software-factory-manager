@@ -1,0 +1,212 @@
+#cloud-config
+#
+# Prepares every server of the system. The tool in apps/api/tools/environment
+# reads this file when it turns an environment on: it writes the host key it
+# generated and the deploy public key in the places marked for them, as a
+# template of Go's text/template, and hands the result to the provider as the
+# user data of the new server. Nothing on a
+# server is set only by hand: a change made there is written here too. Rules:
+# Servers in Environments of CODING_STANDARDS.md.
+#
+# Docker comes from Docker's own repository, at the versions under
+# `packages`. Each version is built for one release of Ubuntu, the system
+# image that the choices of an environment name (deploy/server.*.yaml): the
+# tests of the tool fail when the two differ, so both change together.
+#
+# Docker publishes the port of a container past ufw, through rules of its own
+# in iptables: the firewall below holds only for what runs on the server
+# itself. The Compose file of a server publishes the ports of Caddy, 80 and
+# 443, and nothing else.
+
+# The host key the tool generated, so that the tool, the pipeline and the
+# maintainer know it before the first connection. The keys of the image are
+# deleted. cloud-init makes a key only of a type whose key is missing, so the
+# one type below, which its schema requires, keeps the given key. The upgrade
+# of openssh-server at the first boot makes the other types again: runcmd
+# deletes them, and sshd offers only this one.
+ssh_deletekeys: true
+ssh_genkeytypes: [ed25519]
+ssh_keys:
+  ed25519_private: |
+    {{ indent 4 .HostPrivateKey.Reveal }}
+  ed25519_public: "{{ .HostPublicKey }}"
+
+# SSH by key only, as the deploy user: no password, and no root.
+ssh_pwauth: false
+disable_root: true
+users:
+  - name: deploy
+    shell: /bin/bash
+    lock_passwd: true
+    ssh_authorized_keys:
+      - "{{ .DeployPublicKey }}"
+
+write_files:
+  # Read before 50-cloud-init.conf, so these values win: the first one sshd
+  # reads for a setting is the one it keeps.
+  - path: /etc/ssh/sshd_config.d/10-server.conf
+    permissions: "0644"
+    content: |
+      HostKey /etc/ssh/ssh_host_ed25519_key
+      PermitRootLogin no
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      AuthenticationMethods publickey
+      AllowUsers deploy
+  # Automatic security updates: unattended-upgrades installs, every day, the
+  # updates of Ubuntu's security pocket, and nothing from Docker's
+  # repository, which keeps Docker at the versions below.
+  - path: /etc/apt/apt.conf.d/20auto-upgrades
+    permissions: "0644"
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+  # A package brings only what it depends on, so that installing Docker adds
+  # no package of Docker's at a version this file does not name.
+  - path: /etc/apt/apt.conf.d/90-no-recommends
+    permissions: "0644"
+    content: |
+      APT::Install-Recommends "false";
+  # The metadata service of the provider, at 169.254.169.254, serves the user
+  # data of the server, which holds the private host key, to whatever asks
+  # from the server. The server itself asks it; a container never does.
+  # Docker sends what a container sends out through the chain DOCKER-USER,
+  # which it creates when it is missing and never changes, so the rule there
+  # holds. The unit puts it there on every boot, after ufw has loaded its
+  # rules and before Docker starts, and Docker starts no container without
+  # it.
+  - path: /etc/systemd/system/containers-without-metadata.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Keep every container from the metadata service of the provider
+      After=ufw.service
+      Before=docker.service
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=-/usr/sbin/iptables -N DOCKER-USER
+      ExecStart=/usr/sbin/iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP
+
+      [Install]
+      RequiredBy=docker.service
+
+apt:
+  sources:
+    docker.list:
+      source: "deb [signed-by=$KEY_FILE] https://download.docker.com/linux/ubuntu $RELEASE stable"
+      # Docker Release (CE deb) <docker@docker.com>, fingerprint
+      # 9DC8 5822 9FC7 DD38 854A E2D8 8D81 803C 0EBF CD88, from
+      # https://download.docker.com/linux/ubuntu/gpg.
+      key: |
+        -----BEGIN PGP PUBLIC KEY BLOCK-----
+
+        mQINBFit2ioBEADhWpZ8/wvZ6hUTiXOwQHXMAlaFHcPH9hAtr4F1y2+OYdbtMuth
+        lqqwp028AqyY+PRfVMtSYMbjuQuu5byyKR01BbqYhuS3jtqQmljZ/bJvXqnmiVXh
+        38UuLa+z077PxyxQhu5BbqntTPQMfiyqEiU+BKbq2WmANUKQf+1AmZY/IruOXbnq
+        L4C1+gJ8vfmXQt99npCaxEjaNRVYfOS8QcixNzHUYnb6emjlANyEVlZzeqo7XKl7
+        UrwV5inawTSzWNvtjEjj4nJL8NsLwscpLPQUhTQ+7BbQXAwAmeHCUTQIvvWXqw0N
+        cmhh4HgeQscQHYgOJjjDVfoY5MucvglbIgCqfzAHW9jxmRL4qbMZj+b1XoePEtht
+        ku4bIQN1X5P07fNWzlgaRL5Z4POXDDZTlIQ/El58j9kp4bnWRCJW0lya+f8ocodo
+        vZZ+Doi+fy4D5ZGrL4XEcIQP/Lv5uFyf+kQtl/94VFYVJOleAv8W92KdgDkhTcTD
+        G7c0tIkVEKNUq48b3aQ64NOZQW7fVjfoKwEZdOqPE72Pa45jrZzvUFxSpdiNk2tZ
+        XYukHjlxxEgBdC/J3cMMNRE1F4NCA3ApfV1Y7/hTeOnmDuDYwr9/obA8t016Yljj
+        q5rdkywPf4JF8mXUW5eCN1vAFHxeg9ZWemhBtQmGxXnw9M+z6hWwc6ahmwARAQAB
+        tCtEb2NrZXIgUmVsZWFzZSAoQ0UgZGViKSA8ZG9ja2VyQGRvY2tlci5jb20+iQI3
+        BBMBCgAhBQJYrefAAhsvBQsJCAcDBRUKCQgLBRYCAwEAAh4BAheAAAoJEI2BgDwO
+        v82IsskP/iQZo68flDQmNvn8X5XTd6RRaUH33kXYXquT6NkHJciS7E2gTJmqvMqd
+        tI4mNYHCSEYxI5qrcYV5YqX9P6+Ko+vozo4nseUQLPH/ATQ4qL0Zok+1jkag3Lgk
+        jonyUf9bwtWxFp05HC3GMHPhhcUSexCxQLQvnFWXD2sWLKivHp2fT8QbRGeZ+d3m
+        6fqcd5Fu7pxsqm0EUDK5NL+nPIgYhN+auTrhgzhK1CShfGccM/wfRlei9Utz6p9P
+        XRKIlWnXtT4qNGZNTN0tR+NLG/6Bqd8OYBaFAUcue/w1VW6JQ2VGYZHnZu9S8LMc
+        FYBa5Ig9PxwGQOgq6RDKDbV+PqTQT5EFMeR1mrjckk4DQJjbxeMZbiNMG5kGECA8
+        g383P3elhn03WGbEEa4MNc3Z4+7c236QI3xWJfNPdUbXRaAwhy/6rTSFbzwKB0Jm
+        ebwzQfwjQY6f55MiI/RqDCyuPj3r3jyVRkK86pQKBAJwFHyqj9KaKXMZjfVnowLh
+        9svIGfNbGHpucATqREvUHuQbNnqkCx8VVhtYkhDb9fEP2xBu5VvHbR+3nfVhMut5
+        G34Ct5RS7Jt6LIfFdtcn8CaSas/l1HbiGeRgc70X/9aYx/V/CEJv0lIe8gP6uDoW
+        FPIZ7d6vH+Vro6xuWEGiuMaiznap2KhZmpkgfupyFmplh0s6knymuQINBFit2ioB
+        EADneL9S9m4vhU3blaRjVUUyJ7b/qTjcSylvCH5XUE6R2k+ckEZjfAMZPLpO+/tF
+        M2JIJMD4SifKuS3xck9KtZGCufGmcwiLQRzeHF7vJUKrLD5RTkNi23ydvWZgPjtx
+        Q+DTT1Zcn7BrQFY6FgnRoUVIxwtdw1bMY/89rsFgS5wwuMESd3Q2RYgb7EOFOpnu
+        w6da7WakWf4IhnF5nsNYGDVaIHzpiqCl+uTbf1epCjrOlIzkZ3Z3Yk5CM/TiFzPk
+        z2lLz89cpD8U+NtCsfagWWfjd2U3jDapgH+7nQnCEWpROtzaKHG6lA3pXdix5zG8
+        eRc6/0IbUSWvfjKxLLPfNeCS2pCL3IeEI5nothEEYdQH6szpLog79xB9dVnJyKJb
+        VfxXnseoYqVrRz2VVbUI5Blwm6B40E3eGVfUQWiux54DspyVMMk41Mx7QJ3iynIa
+        1N4ZAqVMAEruyXTRTxc9XW0tYhDMA/1GYvz0EmFpm8LzTHA6sFVtPm/ZlNCX6P1X
+        zJwrv7DSQKD6GGlBQUX+OeEJ8tTkkf8QTJSPUdh8P8YxDFS5EOGAvhhpMBYD42kQ
+        pqXjEC+XcycTvGI7impgv9PDY1RCC1zkBjKPa120rNhv/hkVk/YhuGoajoHyy4h7
+        ZQopdcMtpN2dgmhEegny9JCSwxfQmQ0zK0g7m6SHiKMwjwARAQABiQQ+BBgBCAAJ
+        BQJYrdoqAhsCAikJEI2BgDwOv82IwV0gBBkBCAAGBQJYrdoqAAoJEH6gqcPyc/zY
+        1WAP/2wJ+R0gE6qsce3rjaIz58PJmc8goKrir5hnElWhPgbq7cYIsW5qiFyLhkdp
+        YcMmhD9mRiPpQn6Ya2w3e3B8zfIVKipbMBnke/ytZ9M7qHmDCcjoiSmwEXN3wKYI
+        mD9VHONsl/CG1rU9Isw1jtB5g1YxuBA7M/m36XN6x2u+NtNMDB9P56yc4gfsZVES
+        KA9v+yY2/l45L8d/WUkUi0YXomn6hyBGI7JrBLq0CX37GEYP6O9rrKipfz73XfO7
+        JIGzOKZlljb/D9RX/g7nRbCn+3EtH7xnk+TK/50euEKw8SMUg147sJTcpQmv6UzZ
+        cM4JgL0HbHVCojV4C/plELwMddALOFeYQzTif6sMRPf+3DSj8frbInjChC3yOLy0
+        6br92KFom17EIj2CAcoeq7UPhi2oouYBwPxh5ytdehJkoo+sN7RIWua6P2WSmon5
+        U888cSylXC0+ADFdgLX9K2zrDVYUG1vo8CX0vzxFBaHwN6Px26fhIT1/hYUHQR1z
+        VfNDcyQmXqkOnZvvoMfz/Q0s9BhFJ/zU6AgQbIZE/hm1spsfgvtsD1frZfygXJ9f
+        irP+MSAI80xHSf91qSRZOj4Pl3ZJNbq4yYxv0b1pkMqeGdjdCYhLU+LZ4wbQmpCk
+        SVe2prlLureigXtmZfkqevRz7FrIZiu9ky8wnCAPwC7/zmS18rgP/17bOtL4/iIz
+        QhxAAoAMWVrGyJivSkjhSGx1uCojsWfsTAm11P7jsruIL61ZzMUVE2aM3Pmj5G+W
+        9AcZ58Em+1WsVnAXdUR//bMmhyr8wL/G1YO1V3JEJTRdxsSxdYa4deGBBY/Adpsw
+        24jxhOJR+lsJpqIUeb999+R8euDhRHG9eFO7DRu6weatUJ6suupoDTRWtr/4yGqe
+        dKxV3qQhNLSnaAzqW/1nA3iUB4k7kCaKZxhdhDbClf9P37qaRW467BLCVO/coL3y
+        Vm50dwdrNtKpMBh3ZpbB1uJvgi9mXtyBOMJ3v8RZeDzFiG8HdCtg9RvIt/AIFoHR
+        H3S+U79NT6i0KPzLImDfs8T7RlpyuMc4Ufs8ggyg9v3Ae6cN3eQyxcK3w0cbBwsh
+        /nQNfsA6uu+9H7NhbehBMhYnpNZyrHzCmzyXkauwRAqoCbGCNykTRwsur9gS41TQ
+        M8ssD1jFheOJf3hODnkKU+HKjvMROl1DK7zdmLdNzA1cvtZH/nCC9KPj1z8QC47S
+        xx+dTZSx4ONAhwbS/LN3PoKtn8LPjY9NP9uDWI+TWYquS2U+KHDrBDlsgozDbs/O
+        jCxcpDzNmXpWQHEtHU7649OXHP7UeNST1mCUCH5qdank0V1iejF6/CfTFU4MfcrG
+        YT90qFF93M3v01BbxP+EIY2/9tiIPbrd
+        =0YYh
+        -----END PGP PUBLIC KEY BLOCK-----
+
+package_update: true
+package_upgrade: true
+packages:
+  - ufw
+  - unattended-upgrades
+  # Docker Engine, its command line and Compose, at the versions read on
+  # https://download.docker.com/linux/ubuntu/dists/resolute/stable/ on
+  # 2026-11-19.
+  - [containerd.io, "2.4.2-4~ubuntu.26.04~resolute"]
+  - [docker-ce-cli, "5:29.10.0-1~ubuntu.26.04~resolute"]
+  - [docker-ce, "5:29.10.0-1~ubuntu.26.04~resolute"]
+  - [docker-compose-plugin, "5.8.0-1~ubuntu.26.04~resolute"]
+
+# One shell script, which stops at the first command that fails, so that
+# cloud-init reports the failure and the last line, the signal that the
+# server is prepared, is never written.
+runcmd:
+  - set -eu
+  # cloud-init only warns when this file breaks its schema, and goes on with
+  # what it understood. Checked here, a broken file stops the script before
+  # the signal, and the tool destroys the server. The configuration of the
+  # provider is not checked, so that a deprecation there fails nothing.
+  - cloud-init schema --config-file /var/lib/cloud/instance/cloud-config.txt
+  - usermod --append --groups docker deploy
+  # The firewall inside the server: 22, 80 and 443 in, everything out. SSH is
+  # let in before the firewall starts.
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow 22/tcp
+  - ufw allow 80/tcp
+  - ufw allow 443/tcp
+  - ufw allow 443/udp
+  - ufw --force enable
+  # No container reaches the metadata service: Docker started when it was
+  # installed, and the unit is enabled for every boot after this one.
+  - systemctl daemon-reload
+  - systemctl enable --now containers-without-metadata.service
+  - rm -f /etc/ssh/ssh_host_rsa_key /etc/ssh/ssh_host_rsa_key.pub /etc/ssh/ssh_host_ecdsa_key /etc/ssh/ssh_host_ecdsa_key.pub
+  - sshd -t
+  - systemctl try-restart ssh.service
+  - docker version
+  - docker compose version
+  # The signal that the server is prepared, which the tool waits for.
+  - mkdir -p /var/lib/software-factory-manager
+  - touch /var/lib/software-factory-manager/server-prepared
+
+final_message: "The server is prepared, after $UPTIME seconds."

@@ -1,19 +1,48 @@
 name: CI
 
-# The checks of a pull request, run again on `main` after the merge.
+# The checks of a pull request, run again on `main` after the merge, and the
+# publish of a pull request that has the `staging` label to staging.
 # Rules: Pipeline in CODING_STANDARDS.md.
 
 on:
+  # A label added to a pull request runs the checks again, so that adding
+  # `staging` to one that is open publishes it.
   pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - labeled
   push:
     branches:
       - main
 
 permissions: {}
 
+# The runs of a pull request are in three kinds of concurrency group:
+# - Without the `staging` label, a new run cancels the run before it.
+# - With the label, a run may be publishing, and a publish that started is
+#   never cancelled, or staging is left half-published. These runs wait for
+#   each other instead: the one running ends, and the newest one waiting
+#   runs next. Adding the label starts one beside the checks in flight
+#   without it, which go on, and cancels the run with it in flight: that is
+#   the run of `opened` when `gh pr create --label staging` opens the pull
+#   request, since gh adds the label just after, and the pull request is
+#   then published once. It is a publish only if the label was taken off by
+#   hand and added again while it published, and the new run publishes
+#   again.
+# - Adding another label runs the checks in a group of its own, so that it
+#   cancels no checks in flight and no publish waiting. It publishes
+#   nothing (see the job `staging`).
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: >-
+    ci-${{ github.ref }}${{
+    github.event.action == 'labeled' && github.event.label.name != 'staging' && format('-another-label-{0}', github.run_id) ||
+    contains(github.event.pull_request.labels.*.name, 'staging') && '-staging' || '' }}
+  cancel-in-progress: >-
+    ${{ github.event_name == 'pull_request' && (
+    !contains(github.event.pull_request.labels.*.name, 'staging') ||
+    github.event.action == 'labeled' && github.event.label.name == 'staging') }}
 
 env:
   TASK_VERSION: 3.54.0
@@ -131,6 +160,10 @@ jobs:
       - name: Check that every version is exact
         run: task versions:check
 
+      # docker compose config, with --quiet: it prints nothing.
+      - name: Check the Compose file of staging
+        run: task compose:check
+
       - name: Lint the Go code and check its format, its imports, else and nesting
         run: task api:lint
 
@@ -170,10 +203,14 @@ jobs:
       - name: Build the API binary
         run: task api:build
 
-      # The image of the seed, which staging runs; it is built and published
-      # nowhere.
+      # The images of the seed and of the API, which the servers run; they
+      # are built and published nowhere. Docker builds them, so they need no
+      # Go of the runner.
       - name: Build the image of the seed
         run: task seed:image
+
+      - name: Build the image of the API
+        run: task api:image
 
       - name: Run the Go tests against the PostgreSQL container
         run: task api:test
@@ -249,6 +286,11 @@ jobs:
 
       - name: Check the generated client, format, lint, types, imports, unused code and translations, and run the screen tests
         run: task web:check
+
+      # The build of the app needs the Node.js of this job. The image is
+      # built and published nowhere.
+      - name: Build the web app, and the Caddy image of the servers with it inside
+        run: task caddy:image
 
   # The setup, end to end, in Chromium, through Caddy: the services of
   # development, the API binary on a database that starts empty, and Vite.
@@ -362,3 +404,146 @@ jobs:
                 ;;
             esac
           done
+
+  # Publishes a pull request of this repository that has the `staging` label
+  # to staging, once its checks pass: it builds the three images of the
+  # commit, the one the checks tested, pushes them to the GitHub container
+  # registry, and runs the publish of the tool of the environments. That
+  # reads the label again, logs in to the server over SSH, starts staging
+  # again from the seed, takes the label off every other open pull request
+  # that has it, with a comment there, and comments the addresses on this one
+  # (Publishing in CODING_STANDARDS.md). It is not among the jobs that Checks
+  # needs, so the required check does not change. A pull request from a fork
+  # never gets here, and so never gets the secrets of staging. Adding another
+  # label to a pull request that has `staging` publishes nothing.
+  staging:
+    name: Publish to staging
+    needs: checks
+    if: >-
+      ${{ !cancelled() && needs.checks.result == 'success' &&
+      github.event_name == 'pull_request' &&
+      (github.event.action != 'labeled' || github.event.label.name == 'staging') &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(github.event.pull_request.labels.*.name, 'staging') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # The values of the GitHub Environment are read only by a job that
+    # declares it, and only once the job runs: whether staging is on is told
+    # by its first step, not by the condition of the job.
+    environment: staging
+    # One publish at a time, of any pull request, and a running one is never
+    # cancelled. A publish waiting while another runs gives its place to a
+    # newer one.
+    concurrency:
+      group: staging
+      cancel-in-progress: false
+    # Writing pull requests is what the publish asks of GitHub: it reads the
+    # open pull requests, comments with `gh pr comment`, which the first
+    # publish proved, and takes the label off through the REST API of
+    # issues, whose documentation names that permission as enough. Should
+    # GitHub answer "Resource not accessible by integration" to the label,
+    # `issues: write` beside it is the change.
+    permissions:
+      contents: read # to check out the commit
+      packages: write # to push its images
+      pull-requests: write # to comment on pull requests and take the label off them
+    env:
+      # Each image is one manifest, with no attestation beside it.
+      BUILDX_NO_DEFAULT_ATTESTATIONS: "1"
+    steps:
+      # SERVER_ADDRESS is empty while staging is off: turning it on writes it
+      # last and turning it off deletes it first.
+      - name: Tell whether staging is on
+        id: staging
+        env:
+          SERVER_ADDRESS: ${{ vars.SERVER_ADDRESS }}
+        run: |
+          if [ -n "$SERVER_ADDRESS" ]; then
+            echo "on=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "::notice title=Staging is off::Nothing was published. Turn staging on with task staging:on, then push to the pull request again, or take its label off and add it again."
+          echo "on=false" >> "$GITHUB_OUTPUT"
+
+      # The commit the checks tested: the merge of the pull request into the
+      # branch it merges into.
+      - name: Check out the repository
+        if: ${{ steps.staging.outputs.on == 'true' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # A job that publishes restores no cache, which a pull request could
+      # have filled.
+      - name: Install the Go toolchain that go.mod names
+        if: ${{ steps.staging.outputs.on == 'true' }}
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: apps/api/go.mod
+          cache: false
+
+      # Vite+ and the JavaScript dependencies of the app, which its build
+      # needs; not the Chromium of its tests.
+      - name: Install Vite+ and the dependencies of the app
+        if: ${{ steps.staging.outputs.on == 'true' }}
+        uses: voidzero-dev/setup-vp@cab1ab9eaff52d4857875f4f2c016e36af8f2c76 # v1.22.0
+        with:
+          version-file: package.json
+          working-directory: apps/web
+          run-install: true
+          cache: false
+
+      - name: Install Task
+        if: ${{ steps.staging.outputs.on == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          archive="task_linux_amd64.tar.gz"
+          gh release download "v${TASK_VERSION}" \
+            --repo go-task/task \
+            --pattern "$archive" \
+            --dir "$RUNNER_TEMP"
+          echo "${TASK_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "${RUNNER_TEMP}/${archive}" -C "$RUNNER_TEMP/bin" task
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      # The same targets the checks build them with.
+      - name: Build the three images of the commit
+        if: ${{ steps.staging.outputs.on == 'true' }}
+        run: |
+          task api:image
+          task caddy:image
+          task seed:image
+
+      # Tagged with the hash of the commit, under the names the Compose file
+      # of staging runs. The login lasts for this step alone.
+      - name: Push the three images of the commit to the GitHub container registry
+        if: ${{ steps.staging.outputs.on == 'true' }}
+        env:
+          REGISTRY_TOKEN: ${{ github.token }}
+        run: |
+          echo "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          trap 'docker logout ghcr.io' EXIT
+          for image in api caddy seed; do
+            published="ghcr.io/dannilodms/software-factory-manager-${image}:${GITHUB_SHA}"
+            docker tag "software-factory-manager-${image}:servers" "$published"
+            docker push --quiet "$published"
+          done
+
+      # Every value reaches the tool through its environment, never as an
+      # argument. gh reads the labels, takes them off and comments as the
+      # token of this job.
+      - name: Publish the commit to staging
+        if: ${{ steps.staging.outputs.on == 'true' }}
+        working-directory: apps/api
+        env:
+          COMMIT: ${{ github.sha }}
+          PULL_REQUEST: ${{ github.event.pull_request.number }}
+          SERVER_ADDRESS: ${{ vars.SERVER_ADDRESS }}
+          SERVER_HOST_KEY: ${{ vars.SERVER_HOST_KEY }}
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+          MAILPIT_PASSWORD: ${{ secrets.MAILPIT_PASSWORD }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: go run ./tools/environment publish staging

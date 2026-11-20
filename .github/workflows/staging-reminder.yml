@@ -1,0 +1,57 @@
+name: Staging reminder
+
+# Nothing turns staging off by itself, and the pipeline holds no credential of
+# the provider, so it cannot. Every six hours, and on a manual trigger, this
+# workflow reads when staging was turned on and fails once that is more than
+# 24 hours ago: a failed run warns the maintainer and blocks no pull request.
+# It reads the variable TURNED_ON_AT of the GitHub Environment staging and
+# nothing else, and needs no secret and no permission.
+# Rules: Scheduled workflows in CODING_STANDARDS.md.
+
+on:
+  schedule:
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: staging-reminder
+  cancel-in-progress: false
+
+jobs:
+  reminder:
+    name: Staging on for 24 hours at most
+    runs-on: ubuntu-24.04
+    permissions: {}
+    # A variable of an environment reaches only a job that declares it. With
+    # deployment false the run records no deployment of staging, so its
+    # history keeps only the publishes.
+    environment:
+      name: staging
+      deployment: false
+    steps:
+      # TURNED_ON_AT is when the server was created at the provider, in
+      # RFC 3339 and UTC, written by task staging:on and deleted by
+      # task staging:off: empty while staging is off. No value is printed;
+      # the error of date, which would quote it, is not shown.
+      - name: Fail when staging has been on for more than 24 hours
+        env:
+          TURNED_ON_AT: ${{ vars.TURNED_ON_AT }}
+        run: |
+          if [ -z "$TURNED_ON_AT" ]; then
+            echo "Staging is off."
+            exit 0
+          fi
+          if ! turned_on="$(date --utc --date "$TURNED_ON_AT" +%s 2> /dev/null)"; then
+            echo "::error title=Staging reminder::TURNED_ON_AT of the GitHub Environment staging is not a time. Run task staging:on, which writes it again, or task staging:off."
+            exit 1
+          fi
+          seconds="$(( $(date --utc +%s) - turned_on ))"
+          hours="$(( seconds / 3600 ))"
+          if [ "$seconds" -le 86400 ]; then
+            echo "Staging has been on for ${hours} hours."
+            exit 0
+          fi
+          echo "::error title=Staging reminder::Staging has been on for ${hours} hours, more than 24. Turn it off with task staging:off once its pull request is done."
+          exit 1

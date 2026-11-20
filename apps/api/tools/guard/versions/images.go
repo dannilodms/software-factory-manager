@@ -85,12 +85,22 @@ func compose(content []byte) ([]report.Finding, error) {
 
 // judgeService judges the image of a service. A service with `build` names
 // the image it builds, and the Dockerfile pins what that image is built on.
+// So does an image this repository publishes, which a server names by the
+// commit it was built from.
 func judgeService(service *yaml.Node) []report.Finding {
-	if child(service, "build") != nil {
+	image := child(service, "image")
+	if child(service, "build") != nil || isText(image) && publishedHere.MatchString(image.Value) {
 		return nil
 	}
-	return judgeImage(child(service, "image"))
+	return judgeImage(image)
 }
+
+// publishedHere is an image this repository builds and publishes to the
+// GitHub container registry (Publishing in CODING_STANDARDS.md), the API,
+// Caddy with the built web app or the seed, tagged with one variable of
+// Compose, `${NAME}`, with or without a default or an error after the name:
+// the variable that holds the hash of the commit it was built from.
+var publishedHere = regexp.MustCompile(`^ghcr\.io/dannilodms/software-factory-manager-[a-z]+:\$\{[A-Za-z_][A-Za-z0-9_]*(:?[-?+][^}]*)?\}$`)
 
 // dockerfile judges the image of every `FROM` and of every `COPY --from`
 // that is not an earlier stage, and what xcaddy builds into Caddy.

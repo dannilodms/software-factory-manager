@@ -75,6 +75,11 @@ var kinds = map[string]kind{
 			"localhost:5000/caddy:2.10.2",
 			"gcr.io/distroless/static-debian12@sha256:" + strings.Repeat("a", 64),
 			"caddy:2@sha256:" + strings.Repeat("0", 64),
+			// An image this repository builds and publishes, named on a
+			// server by the commit it was built from.
+			"ghcr.io/dannilodms/software-factory-manager-api:${COMMIT}",
+			"ghcr.io/dannilodms/software-factory-manager-caddy:${COMMIT:?Set COMMIT, the hash of the commit published}",
+			"ghcr.io/dannilodms/software-factory-manager-seed:0.1.0",
 		},
 		inexact: []string{
 			"caddy",
@@ -88,6 +93,11 @@ var kinds = map[string]kind{
 			"localhost:5000/caddy",
 			"caddy@sha256:abc",
 			"caddy:${CADDY_VERSION}",
+			"ghcr.io/dannilodms/software-factory-manager-api",
+			"ghcr.io/dannilodms/software-factory-manager-api:latest",
+			"ghcr.io/dannilodms/software-factory-manager-api:v${COMMIT}",
+			"ghcr.io/dannilodms/software-factory-manager-api:${COMMIT}-alpine",
+			"ghcr.io/someone-else/software-factory-manager-api:${COMMIT}",
 		},
 	},
 	"an image of the Compose file of development": {

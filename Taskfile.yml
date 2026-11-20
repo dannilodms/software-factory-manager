@@ -81,12 +81,31 @@ tasks:
       - go run ./cmd/seed
 
   seed:image:
-    desc: Build the image of the seed, the `seed` service of compose.yaml, and publish nothing
+    desc: Build the image of the seed, software-factory-manager-seed:servers, which staging runs on every publish, and publish nothing
     cmds:
       # The image staging runs on every publish (Seed in Environments in
       # CODING_STANDARDS.md); the pipeline builds it on every pull request,
-      # so a change that breaks its build fails before it is published.
-      - docker compose --profile seed build seed
+      # so a change that breaks its build fails before it is published. The
+      # `seed` service of compose.yaml builds the same Dockerfile, under the
+      # name of development.
+      - docker build --file apps/api/cmd/seed/Dockerfile --tag software-factory-manager-seed:servers apps/api
+
+  api:image:
+    desc: Build the image of the API, software-factory-manager-api:servers, which the servers run with each command of the binary, and publish nothing
+    cmds:
+      # The pipeline builds it on every pull request, as it builds the image
+      # of the seed, so a change that breaks its build fails before it is
+      # published (Publishing in CODING_STANDARDS.md).
+      - docker build --file apps/api/cmd/api/Dockerfile --tag software-factory-manager-api:servers apps/api
+
+  caddy:image:
+    desc: Build the web app, and the Caddy image of the servers with it inside, software-factory-manager-caddy:servers, and publish nothing
+    cmds:
+      # The app is built here every time, so the image never holds an
+      # earlier build. The output of the build is the context of the stage
+      # `servers`, which copies it whole.
+      - task: web:build
+      - docker build --file deploy/caddy/Dockerfile --target servers --tag software-factory-manager-caddy:servers apps/web/dist
 
   api:
     desc: Start the API
@@ -117,6 +136,30 @@ tasks:
     silent: true
     cmds:
       - echo "The app opens at $APP_ORIGIN, through Caddy, which task services starts."
+
+  # Staging is turned on and off by hand, from the main checkout or a
+  # worktree of it, by the tool of the environments (Servers in Environments
+  # in CODING_STANDARDS.md). The token of the provider, HETZNER_TOKEN, comes
+  # from the .env of the main checkout, and so does the password of Mailpit,
+  # STAGING_MAILPIT_PASSWORD, which the tool writes there the first time.
+  # The tool writes to GitHub through gh, logged in as the maintainer.
+  staging:on:
+    desc: Turn staging on. Creates its server at Hetzner, prepared by deploy/cloud-init.yaml, waits until it is ready and gives the GitHub Environment staging what reaches it; destroys it when that fails. When staging is on, checks that it answers, gives GitHub its values again and creates nothing
+    dir: apps/api
+    cmds:
+      - go run ./tools/environment on staging
+
+  staging:off:
+    desc: Turn staging off. Destroys its server, with its address and its deploy key, and takes them out of the GitHub Environment staging, which keeps the password of Mailpit. When staging is off, destroys nothing
+    dir: apps/api
+    cmds:
+      - go run ./tools/environment off staging
+
+  staging:status:
+    desc: Tell whether staging is on, since when, at which address and host names, and which open pull request has the staging label
+    dir: apps/api
+    cmds:
+      - go run ./tools/environment status staging
 
   api:build:
     desc: Build the API binary into apps/api/bin
@@ -221,6 +264,14 @@ tasks:
         SELECT format('DROP DATABASE %I', datname) FROM pg_database
           WHERE datname LIKE 'test\_%' OR datname LIKE 'testdb\_%' \gexec
         SQL
+
+  web:build:
+    desc: Build the web app for the servers into apps/web/dist, with a Brotli copy beside each text file
+    dir: apps/web
+    cmds:
+      # The one build of the app: the checks run it through caddy:image,
+      # which copies its output into the Caddy image of the servers.
+      - vp build
 
   web:generate:
     desc: Generate the API client, its Zod schemas and its simulated responses from apps/api/openapi.yaml, with orval
@@ -338,6 +389,18 @@ tasks:
       # audits too; without it, the offline ones.
       - docker run --rm --volume "{{.ROOT_DIR}}:/repository:ro" --workdir /repository --env GH_TOKEN {{.ZIZMOR_IMAGE}} --color=always .
 
+  compose:check:
+    desc: Check the Compose file of staging, deploy/compose.staging.yaml, with docker compose config, which prints nothing
+    env:
+      # What only a server is given, by the publish; every other variable
+      # comes from .env.example. Compose checks that each one it requires
+      # has a value, and reads none of them further here.
+      COMMIT: "0000000000000000000000000000000000000000"
+      MAILPIT_PASSWORD_HASH: the-bcrypt-hash-of-the-password-of-mailpit
+    cmds:
+      # --quiet, because the configuration Compose prints holds every value.
+      - docker compose --file deploy/compose.staging.yaml config --quiet
+
   versions:check:
     desc: Check that every version the repository pins is exact
     dir: apps/api
@@ -354,6 +417,7 @@ tasks:
     desc: Every check of task check but the end-to-end test, for daily use. It needs no free port and does not restart Caddy, so it runs beside task dev
     cmds:
       - task: versions:check
+      - task: compose:check
       - task: workflows:check
       - task: web:check
       - task: api:lint
@@ -363,6 +427,11 @@ tasks:
       - task: api:spec:lint
       - task: api:spec:breaking
       - task: api:build
+      # The three images a commit is published with, built and published
+      # nowhere, as the pipeline builds them.
+      - task: api:image
+      - task: caddy:image
+      - task: seed:image
       - task: api:test
 
   check:fix:

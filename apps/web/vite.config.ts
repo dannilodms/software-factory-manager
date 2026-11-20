@@ -6,6 +6,8 @@ import { msw } from "msw/vite"
 import { defineConfig } from "vite-plus"
 import { playwright } from "vite-plus/test/browser-playwright"
 
+import { brotliCopies } from "./brotli-copies.ts"
+
 // The build, the format, lint and type checks that `vp check` runs, and the
 // screen tests that `vp test` runs.
 export default defineConfig({
@@ -18,7 +20,16 @@ export default defineConfig({
     // Serves the worker of MSW, which simulates the API in the screen tests.
     // The build emits nothing of it: the app never imports `virtual:msw`.
     msw(),
+    // The Brotli copies of the build, which Caddy serves on the servers.
+    brotliCopies(),
   ],
+  build: {
+    // Every file of the build is a file of its own under /assets/, a font
+    // too small to be worth a request included: none goes inline as a
+    // `data:` URL, which the Content-Security-Policy of the servers refuses
+    // (Security headers in Delivery, CODING_STANDARDS.md).
+    assetsInlineLimit: 0,
+  },
   optimizeDeps: {
     // Every source file, so the dependencies a lazy route or a test imports
     // are found at the start, and not halfway through a run of the screen
